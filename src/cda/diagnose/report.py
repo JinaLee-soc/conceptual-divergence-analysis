@@ -22,7 +22,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from cda.config import Config
-from cda.corpus.ingest import get_collection
+from cda.corpus.ingest import corpus_lock, get_collection
 from cda.corpus.timeframe import (
     DATE_SOURCES,
     describe_window,
@@ -224,7 +224,8 @@ def gather_composition(
     """
     collection = collection if collection is not None else get_collection(config)
     window = timeframe_from_config(config)
-    works = corpus_works(collection, window)
+    with corpus_lock(config, progress):
+        works = corpus_works(collection, window)
     if window["active"]:
         progress(f"[diagnose] corpus timeframe: {describe_window(window)}")
     with_doi = [work for work in works if work["doi"]]

@@ -20,7 +20,13 @@ from cda.clustering.spherical import normalize_rows
 from cda.config import Config
 from cda.corpus.embeddings import get_embedder
 from cda.corpus.ingest import get_collection
-from cda.pipeline import clustering_mode, extract_passages, map_divergence, resolution_params
+from cda.pipeline import (
+    _prepare_output_dir,
+    clustering_mode,
+    extract_passages,
+    map_divergence,
+    resolution_params,
+)
 from cda.types import Passage
 from cda.validation.agents import estimate_cost, read_clusters, reader_provider, resolve_readers
 from cda.validation.prompt_loader import load_validation_prompts
@@ -81,6 +87,8 @@ def run_validation(
         # would cluster the whole corpus (and, live, pay for readings of it)
         # filed under a meaningless slug.
         raise ValueError("--term is empty. Pass the term the analysis should validate.")
+
+    output_dir = _prepare_output_dir(config)
 
     # Construct every reader's provider BEFORE the heavy stages, for the same
     # reason analyze_term validates its provider up front: a missing API key
@@ -221,7 +229,7 @@ def run_validation(
         partitions=partitions,
         passages=passages_map,
         readings=readings,
-        output_dir=config.path("paths.output_dir"),
+        output_dir=output_dir,
         now=now,
     )
     report_text = render_validation_report(session, config, now)

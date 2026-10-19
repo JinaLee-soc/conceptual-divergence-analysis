@@ -238,12 +238,18 @@ def term_regex(term: str) -> re.Pattern[str]:
     return re.compile(rf"{lead}{escaped}{trail}", flags=re.IGNORECASE)
 
 
+def term_identity(term: str) -> str:
+    """Compare saved terms without changing punctuation or literal word order."""
+    return unicodedata.normalize("NFC", " ".join(term.split())).lower()
+
+
 def safe_term_slug(term: str) -> str:
-    """Filesystem-safe, deterministic slug; distinct terms get distinct slugs.
+    """Filesystem-safe, deterministic display slug.
 
     The term is NFC-normalized first, so composed and decomposed spellings of
     one term share a slug. A term with no ASCII letters or digits gets a short
-    content hash instead of an empty slug.
+    content hash instead of an empty slug. Different terms can share a slug
+    (C++ and C#, for example); result lookup must compare the saved term too.
     """
     term = unicodedata.normalize("NFC", term)
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", term).strip("_").lower()

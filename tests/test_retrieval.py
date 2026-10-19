@@ -98,3 +98,42 @@ def test_keyword_hits_no_warning_when_everything_fits():
     )
     assert len(hits) == 50
     assert not any("cap" in m for m in messages)
+
+
+@pytest.mark.parametrize(
+    ("term", "false_text", "valid_text"),
+    [
+        ("novel", "A novelist writes stories.", "A novel is a work of fiction."),
+        (
+            "social capital",
+            "Social capitalism is an economic system.",
+            "Social capital is relational.",
+        ),
+        (
+            "novel idea",
+            "That is a novel. Idea formation takes time.",
+            "A novel idea changes the field.",
+        ),
+    ],
+)
+def test_cap_counts_only_chunks_with_matching_sentences(
+    tmp_config, fake_embedder, term, false_text, valid_text
+):
+    from cda.corpus.ingest import get_collection, ingest_records
+
+    ingest_records(
+        tmp_config,
+        fake_embedder,
+        [
+            {"source": "first.abstract", "abstract": false_text},
+            {"source": "second.abstract", "abstract": valid_text},
+        ],
+        progress=lambda _: None,
+    )
+    messages = []
+    hits = keyword_hits(
+        get_collection(tmp_config), term, batch_size=1, max_chunks=1, progress=messages.append
+    )
+    _, passages, _ = build_passages(term, hits, lambda *_: (False, "literature"), tmp_config)
+    assert [p.text for p in passages] == [valid_text]
+    assert not any("hit the cap" in m for m in messages)

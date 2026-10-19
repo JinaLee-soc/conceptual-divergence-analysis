@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from cda.extraction.windows import safe_term_slug
+from cda.extraction.windows import safe_term_slug, term_identity
 from cda.outputs import write_text_atomic
 
 SCHEMA = "cda-validation-session/1"
@@ -195,7 +195,7 @@ def load_session(session_dir: Path) -> dict:
 
 
 def find_latest_session(output_dir: Path, term: str) -> Path:
-    """Newest session dir for exactly this term's slug.
+    """Newest session dir whose stored term matches the requested term.
 
     Matches the full directory-name pattern and compares the slug exactly,
     then sorts by the parsed timestamp: a term whose slug extends another
@@ -209,6 +209,9 @@ def find_latest_session(output_dir: Path, term: str) -> Path:
         for path in root.iterdir():
             match = _SESSION_DIR.match(path.name)
             if match and match.group("slug") == slug and (path / "session.json").is_file():
+                stored = load_session(path).get("term")
+                if not isinstance(stored, str) or term_identity(stored) != term_identity(term):
+                    continue
                 # Within one second, a higher collision suffix means a later
                 # session: create_session hands out -1, -2, … in order.
                 candidates.append((match.group("ts"), int(match.group("n") or 0), path))

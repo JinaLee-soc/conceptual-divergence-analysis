@@ -155,6 +155,21 @@ def test_same_second_sessions_get_distinct_dirs_and_the_finder_sees_them(tmp_pat
     assert find_latest_session(tmp_path, "novelty") == second_dir
 
 
+@pytest.mark.parametrize(("wanted", "other"), [("C++", "C#"), ("social capital", "social-capital")])
+def test_find_latest_session_checks_stored_term_for_a_shared_slug(tmp_path, wanted, other):
+    first, _ = make_session(tmp_path, term=wanted)
+    second, _ = make_session(tmp_path, term=other)
+    assert second.name == first.name + "-1"
+    assert find_latest_session(tmp_path, wanted) == first
+    assert find_latest_session(tmp_path, other) == second
+
+
+def test_find_latest_session_does_not_resume_only_a_colliding_term(tmp_path):
+    make_session(tmp_path, term="C#")
+    with pytest.raises(FileNotFoundError):
+        find_latest_session(tmp_path, "C++")
+
+
 def test_endorse_records_current_revisions(tmp_path):
     _dir, session = make_session(tmp_path)
     for cluster_id in (0, 1):

@@ -89,6 +89,38 @@ def test_run_validation_creates_session_and_report(tmp_path, anchored_embedder):
     assert "—" not in report  # boilerplate convention: no em-dashes
 
 
+def test_validation_checks_output_directory_before_reading_clusters(tmp_path, anchored_embedder):
+    import pytest
+
+    from cda.config import ConfigError
+
+    config = build_store(tmp_path, anchored_embedder)
+    config.path("paths.output_dir").write_text("a file, not a directory")
+    reader = OracleReader()
+    with pytest.raises(ConfigError, match="output directory"):
+        run_validation(
+            "novelty",
+            config,
+            embedder=anchored_embedder,
+            providers={"claude-sonnet-4-6": reader},
+            progress=lambda _: None,
+        )
+    assert reader.calls == 0
+    assert not list(tmp_path.rglob("session.json"))
+
+
+def test_validation_rejects_unwritable_output_before_loading_models(tmp_path, monkeypatch):
+    import pytest
+
+    import cda.pipeline as pipeline
+    from cda.config import ConfigError
+
+    config = load_config(overrides={"paths": {"output_dir": str(tmp_path)}})
+    monkeypatch.setattr(pipeline.os, "access", lambda *_: False)
+    with pytest.raises(ConfigError, match="not writable"):
+        run_validation("novelty", config, progress=lambda _: None)
+
+
 def test_run_validation_shown_passages_capped_and_blind(tmp_path, anchored_embedder):
     config = build_store(tmp_path, anchored_embedder)
     captured = []

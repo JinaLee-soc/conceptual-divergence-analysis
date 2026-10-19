@@ -30,7 +30,7 @@ from cda.clustering.spherical import cluster_passages
 from cda.config import Config, ConfigError
 from cda.corpus.drafts import load_drafts, normalize_drafts
 from cda.corpus.embeddings import Embedder, get_embedder
-from cda.corpus.ingest import get_collection
+from cda.corpus.ingest import corpus_lock, get_collection
 from cda.corpus.timeframe import describe_window, filter_by_date_added, timeframe_from_config
 from cda.divergence.flags import compute_flags, compute_joint_flags
 from cda.divergence.report import render_report, write_outputs
@@ -132,18 +132,13 @@ def resolution_params(config: Config) -> dict:
         fixed_k = None
     else:
         try:
-            fixed_k = int(raw_k)
-        except (TypeError, ValueError):
+            fixed_k = config.get_int("clustering.k", minimum=2)
+        except ConfigError:
             raise ConfigError(
                 f"clustering.k must be 'auto' or an integer >= 2, got {raw_k!r}. "
                 "'auto' selects k by silhouette (the paper's method); an integer "
                 "fixes the resolution. See config.example.yaml."
             ) from None
-        if fixed_k < 2:
-            raise ConfigError(
-                f"clustering.k must be 'auto' or an integer >= 2, got {fixed_k}. "
-                "A one-cluster partition carries no divergence information."
-            )
     max_k_params(config)  # validated with the other resolution settings
     return {"method": method, "fixed_k": fixed_k}
 
@@ -364,12 +359,13 @@ def extract_passages(
     cluster the exact same passage sets a real analysis would.
     """
     progress(f"[1/3] extracting passages for '{term}'")
-    contains = keyword_hits(
-        collection,
-        term,
-        max_chunks=config.get_int("retrieval.keyword_max_chunks", minimum=0),
-        progress=progress,
-    )
+    with corpus_lock(config, progress):
+        contains = keyword_hits(
+            collection,
+            term,
+            max_chunks=config.get_int("retrieval.keyword_max_chunks", minimum=0),
+            progress=progress,
+        )
 
     researcher_passages, literature_passages, stats = build_passages(
         term, contains, mywork_classifier(config.section("mywork")), config

@@ -444,7 +444,7 @@ def test_verify_labels_the_primary_model_from_the_report_header(tmp_path, monkey
         "### Cluster A: repair\n",
         encoding="utf-8",
     )
-    (tmp_path / f"{base}_prompt.md").write_text("prompt", encoding="utf-8")
+    (tmp_path / f"{base}_prompt.md").write_text('TARGET TERM: "novelty"\nprompt', encoding="utf-8")
     (tmp_path / f"{base}_system.md").write_text("system", encoding="utf-8")
     second = SimpleNamespace(
         name="stub", model="haiku", complete=lambda **_: "### Cluster R1: replayed\n"

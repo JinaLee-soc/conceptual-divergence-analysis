@@ -33,7 +33,7 @@ from pathlib import Path
 
 from cda.config import Config
 from cda.divergence.report import END_OF_LLM_BODY
-from cda.extraction.windows import safe_term_slug
+from cda.extraction.windows import safe_term_slug, term_identity
 from cda.llm.base import FixtureMissError, LLMError
 from cda.llm.mock import MockProvider, require_recorded_fixtures
 from cda.llm.providers import fixture_model, llm_temperature, resolve_model_spec, spec_model
@@ -57,10 +57,11 @@ _LEGACY_COMPUTED_HEADING = "\n## Clustering Stability (computed)\n"
 # optional same-second collision suffix. Prompt/diagnostics/verification
 # files can't match (their names continue past the timestamp).
 _RUN_REPORT = re.compile(r"^drift_(?P<slug>.+)_(?P<ts>\d{8}_\d{6})(?:-(?P<n>\d+))?\.md$")
+_SAVED_TERM = re.compile(r'\ATARGET TERM: "(.*?)"(?:\r?\n|\Z)', re.DOTALL)
 
 
 def find_latest_run(output_dir: Path, term: str) -> tuple[Path, Path]:
-    """Newest report for exactly this term's slug, with the SAME run's prompt.
+    """Newest report for this saved term, with the SAME run's prompt.
 
     A run writes ``drift_<term>_<ts>.md`` and ``drift_<term>_<ts>_prompt.md``
     with one shared timestamp, so the prompt is derived from the report
@@ -82,11 +83,13 @@ def find_latest_run(output_dir: Path, term: str) -> tuple[Path, Path]:
                 continue
             prompt = path.with_name(f"{path.stem}_prompt.md")
             if prompt.exists():
-                candidates.append((match.group("ts"), int(match.group("n") or 0), prompt, path))
+                saved_term = _SAVED_TERM.match(_read_run_file(prompt))
+                if saved_term and term_identity(saved_term.group(1)) == term_identity(term):
+                    candidates.append((match.group("ts"), int(match.group("n") or 0), prompt, path))
     if not candidates:
         raise FileNotFoundError(
             f"No complete previous run for '{term}' found in {output_dir} (a report "
-            "with its matching saved prompt). Run `cda analyze --term "
+            "with its matching saved prompt and target term). Run `cda analyze --term "
             f"{term}` (or the demo) first."
         )
     _, _, prompt, report = max(candidates, key=lambda entry: (entry[0], entry[1]))

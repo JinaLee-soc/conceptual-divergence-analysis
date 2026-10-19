@@ -717,8 +717,8 @@ def test_a_held_ingest_lock_is_waited_on_then_reported(tmp_path, fake_embedder, 
     from cda.config import load_config
 
     corpus_dir = tmp_path / "corpus"
-    corpus_dir.mkdir()
-    (corpus_dir / ".ingest.lock").write_text("12345\n")
+    (corpus_dir / "chroma").mkdir(parents=True)
+    (corpus_dir / "chroma" / ".ingest.lock").write_text("12345\n")
     monkeypatch.setattr(ing, "_INGEST_LOCK_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr(ing, "_INGEST_LOCK_POLL_SECONDS", 0.01)
 
@@ -733,7 +733,7 @@ def test_a_held_ingest_lock_is_waited_on_then_reported(tmp_path, fake_embedder, 
         )
     assert any("another ingest" in m.lower() for m in messages)
     # The stale lock is not cleaned up by the waiter: it belongs to the holder.
-    assert (corpus_dir / ".ingest.lock").exists()
+    assert (corpus_dir / "chroma" / ".ingest.lock").exists()
 
 
 def test_the_ingest_lock_is_released_after_a_run(tmp_path, fake_embedder):
@@ -748,7 +748,7 @@ def test_the_ingest_lock_is_released_after_a_run(tmp_path, fake_embedder):
         progress=lambda _m: None,
     )
     assert stats["records_ingested"] == 1
-    assert not (tmp_path / "corpus" / ".ingest.lock").exists()
+    assert not (tmp_path / "corpus" / "chroma" / ".ingest.lock").exists()
 
 
 # --- stored-text normalization ------------------------------------------------

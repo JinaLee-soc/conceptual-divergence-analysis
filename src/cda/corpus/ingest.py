@@ -74,19 +74,23 @@ def _refuse_source_kind(collection, sources: list[str], kind: str) -> None:
                 )
 
 
-def get_collection(config: Config, *, create: bool = False):
-    """Open (or create) the CDA collection, with a clear next step on failure."""
-    import chromadb
-    from chromadb.config import Settings
-
+def _store_directory(config: Config) -> Path:
+    """Resolve both supported corpus layouts to the same physical store."""
     corpus_dir = config.path("paths.corpus_dir")
     # Standard layout: the store lives at <corpus_dir>/chroma. But when
     # corpus_dir itself IS a ChromaDB store (it contains chroma.sqlite3 —
     # e.g. pointing CDA at a pre-existing store), use it directly.
     if (corpus_dir / "chroma.sqlite3").is_file():
-        chroma_dir = corpus_dir
-    else:
-        chroma_dir = corpus_dir / "chroma"
+        return corpus_dir.resolve()
+    return (corpus_dir / "chroma").resolve()
+
+
+def get_collection(config: Config, *, create: bool = False):
+    """Open (or create) the CDA collection, with a clear next step on failure."""
+    import chromadb
+    from chromadb.config import Settings
+
+    chroma_dir = _store_directory(config)
     collection_name = str(config.get("corpus.collection"))
 
     if not create and not chroma_dir.exists():
@@ -218,15 +222,18 @@ _INGEST_LOCK_POLL_SECONDS = 0.5
 
 
 @contextmanager
-def _ingest_lock(config: Config, progress: Callable[[str], None]):
-    """One ingest per store at a time, across threads and processes.
+def corpus_lock(config: Config, progress: Callable[[str], None]):
+    """Serialize ingest and complete retrievals across threads and processes.
 
-    An ``O_EXCL`` lockfile beside the store serializes the mutation phase;
-    two concurrent first-run ingests would otherwise both add the same ids.
+    A retrieval holds this lock across every page, so no reader can observe
+    the delete/add gap in a source replacement. It can release the lock once
+    the records are in memory; clustering and model calls do not need it.
+    The lock lives inside the resolved store so both supported path layouts
+    and symlink aliases coordinate on the same file.
     """
-    corpus_dir = config.path("paths.corpus_dir")
-    corpus_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = corpus_dir / ".ingest.lock"
+    store_dir = _store_directory(config)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = store_dir / ".ingest.lock"
     deadline = time.monotonic() + _INGEST_LOCK_TIMEOUT_SECONDS
     announced = False
     while True:
@@ -236,22 +243,24 @@ def _ingest_lock(config: Config, progress: Callable[[str], None]):
         except FileExistsError:
             if not announced:
                 progress(
-                    "[ingest] another ingest is running on this corpus "
+                    "[corpus] another ingest or retrieval is running on this corpus "
                     f"(lock file: {lock_path}); waiting for it to finish…"
                 )
                 announced = True
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"Another ingest still holds {lock_path} after "
-                    f"{_INGEST_LOCK_TIMEOUT_SECONDS}s. If an ingest is running in "
+                    f"Another ingest or retrieval still holds {lock_path} after "
+                    f"{_INGEST_LOCK_TIMEOUT_SECONDS}s. If a corpus operation is running in "
                     "another window (GUI or CLI), let it finish and rerun. If "
                     "none is — a previous ingest crashed before cleaning up — "
                     "it is safe to delete that lock file and rerun."
                 ) from None
             time.sleep(_INGEST_LOCK_POLL_SECONDS)
     try:
-        os.write(fd, f"{os.getpid()}\n".encode())  # who holds it, for debugging
-        os.close(fd)
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode())
+        finally:
+            os.close(fd)
         yield
     finally:
         lock_path.unlink(missing_ok=True)
@@ -432,36 +441,40 @@ def select_pdfs(pdf_dir: Path, *, recursive: bool = True, exclude: list[str] | N
     trailing slash is stripped, and the ``.pdf`` check ignores case. Patterns
     and paths are compared in NFC, so a composed pattern excludes a folder
     whose name is stored decomposed (as macOS often does). Symlinked folders
-    are followed; a folder reached twice is walked once.
+    are followed; each physical file is selected once, after exclusions.
     """
     found = (p for p in _walk_files(pdf_dir, recursive) if p.suffix.lower() == ".pdf")
     kept, excluded = [], 0
+    seen: set[str] = set()
     for path in sorted(p for p in found if p.is_file()):
         if _is_excluded(path.relative_to(pdf_dir), exclude):
             excluded += 1
             continue
-        kept.append(path)
+        real = os.path.realpath(path)
+        if real not in seen:
+            seen.add(real)
+            kept.append(path)
     return kept, excluded
 
 
 def _walk_files(pdf_dir: Path, recursive: bool) -> list[Path]:
     """Files under ``pdf_dir`` (only its top level unless ``recursive``), following folder symlinks.
 
-    The resolved path of every folder walked is remembered, so a symlink
-    cycle or a second link to one folder cannot repeat it.
+    Stop symlink cycles at ancestors, but retain other routes to a folder:
+    exclusion patterns can accept one route and reject another. Selection
+    deduplicates physical files only after evaluating those patterns.
     """
     if not recursive:
         return list(pdf_dir.iterdir())
     files: list[Path] = []
-    walked = {os.path.realpath(pdf_dir)}
     for folder, subfolders, names in os.walk(pdf_dir, followlinks=True):
-        unseen = []
-        for name in sorted(subfolders):
-            real = os.path.realpath(os.path.join(folder, name))
-            if real not in walked:
-                walked.add(real)
-                unseen.append(name)
-        subfolders[:] = unseen
+        parts = Path(folder).relative_to(pdf_dir).parts
+        ancestors = {os.path.realpath(pdf_dir.joinpath(*parts[:i])) for i in range(len(parts) + 1)}
+        subfolders[:] = [
+            name
+            for name in sorted(subfolders)
+            if os.path.realpath(os.path.join(folder, name)) not in ancestors
+        ]
         files.extend(Path(folder) / name for name in names)
     return files
 
@@ -880,7 +893,7 @@ def ingest_pdf_dir(
     }
     unreadable: list[str] = []
     unchecked: set[str] = set()  # stored relpaths whose folder could not be listed
-    with _ingest_lock(config, progress):
+    with corpus_lock(config, progress):
         collection = get_collection(config, create=True)
         chunk_size, chunk_overlap = _chunk_settings(config)
         stored_sources = _stored_pdf_sources(collection)
@@ -1131,7 +1144,7 @@ def ingest_records(
     _refuse_colliding_record_keys(records, source_field=source_field)
 
     stats = {"records_seen": 0, "records_ingested": 0, "records_stale": 0, "chunks_added": 0}
-    with _ingest_lock(config, progress):
+    with corpus_lock(config, progress):
         collection = get_collection(config, create=True)
         chunk_size, chunk_overlap = _chunk_settings(config)
         _refuse_source_kind(

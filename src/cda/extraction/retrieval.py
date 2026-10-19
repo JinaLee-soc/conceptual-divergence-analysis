@@ -47,7 +47,11 @@ def keyword_hits(
     max_chunks: int = 0,
     progress: Callable[[str], None] = print,
 ) -> dict:
-    """Literal term hits, including phrases across chunk edges, capped at ``max_chunks``."""
+    """Literal hits from a stable collection, capped after sentence matching.
+
+    The pipeline holds ``corpus_lock`` across this entire paged read. Direct
+    callers reading a store that may be updated must hold that lock too.
+    """
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("retrieval batch_size must be a positive integer.")
     if type(max_chunks) is not int or max_chunks < 0:
@@ -61,6 +65,7 @@ def keyword_hits(
     anchor = max(words, key=len) if phrase else term
     where_document = literal_filter(anchor)
     phrase_pattern = re.compile(literal_pattern(term), re.IGNORECASE)
+    sentence_pattern = term_regex(term)
     seen_ids: set[str] = set()
     offset = 0
     capped = False
@@ -104,6 +109,10 @@ def keyword_hits(
                         f"Invalid sentence context in corpus chunk {chunk_id!r}; re-ingest its source."
                     )
                 if not phrase_pattern.search(context):
+                    continue
+            if max_chunks:
+                sentences, _ = _chunk_sentences(str(chunk_id), document, metadata)
+                if not any(sentence_pattern.search(sentence) for sentence in sentences):
                     continue
             if max_chunks and len(hits) >= max_chunks:  # exact cap, even mid-batch
                 capped = True

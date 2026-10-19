@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Corpus access and result lookup
+
+- Analysis and corpus diagnosis wait for ingestion to finish and hold the same
+  store lock across all retrieval pages. Direct store paths and symlink aliases
+  share that lock. Clustering and model calls run after it is released.
+- Result verification and validation-session resume compare the saved target
+  term, so terms sharing a filename slug (such as `C++` and `C#`) stay separate.
+  Existing report and session filenames remain readable.
+- A configured keyword retrieval cap counts only chunks containing a matching
+  sentence; substring false positives no longer consume the cap.
+- Validation checks its output directory before calling any reader model.
+- PDF exclusions are applied before aliases are deduplicated, preserving files
+  reachable through an included path while stopping symlink cycles.
+- Fixed cluster counts reject fractional and nonfinite values instead of
+  truncating them or failing with a Python conversion error.
+
 ### Review fixes
 
 **Re-ingest required.** The sentence segmenter is now `pysbd-0.3.4+blocks-v3`

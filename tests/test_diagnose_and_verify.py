@@ -220,13 +220,16 @@ def test_extract_register_structure():
     assert structure["distance_ratings"] == [4, 2]
 
 
-def _write_run(out_dir, slug, ts, suffix=""):
+def _write_run(out_dir, slug, ts, suffix="", *, term=None):
     base = f"drift_{slug}_{ts}{suffix}"
     (out_dir / f"{base}.md").write_text(
         "<!-- generated: 2026-08-01T09:00:00 | model: claude-sonnet-4-6 | cda: v1 -->\nreport",
         encoding="utf-8",
     )
-    (out_dir / f"{base}_prompt.md").write_text("prompt", encoding="utf-8")
+    (out_dir / f"{base}_prompt.md").write_text(
+        f'TARGET TERM: "{term if term is not None else slug.replace("_", " ")}"\n\nprompt',
+        encoding="utf-8",
+    )
 
 
 def test_find_latest_run_never_pairs_a_prefix_sharing_term(tmp_path):
@@ -257,6 +260,29 @@ def test_find_latest_run_skips_reports_missing_their_prompt(tmp_path):
     (tmp_path / "drift_novelty_20260801_100000.md").write_text("orphan", encoding="utf-8")
     _, report = find_latest_run(tmp_path, "novelty")
     assert report.name == "drift_novelty_20260801_090000.md"
+
+
+@pytest.mark.parametrize(("wanted", "other"), [("C++", "C#"), ("social capital", "social-capital")])
+def test_find_latest_run_checks_the_actual_term_when_slugs_collide(tmp_path, wanted, other):
+    from cda.extraction.windows import safe_term_slug
+
+    slug = safe_term_slug(wanted)
+    assert slug == safe_term_slug(other)
+    _write_run(tmp_path, slug, "20261019_090000", term=wanted)
+    _write_run(tmp_path, slug, "20261019_100000", term=other)
+    prompt, report = find_latest_run(tmp_path, wanted)
+    assert "090000" in report.name
+    assert f'TARGET TERM: "{wanted}"' in prompt.read_text()
+    assert "100000" in find_latest_run(tmp_path, other)[1].name
+
+
+def test_find_latest_run_refuses_a_colliding_or_unidentified_prompt(tmp_path):
+    _write_run(tmp_path, "c", "20261019_090000", term="C#")
+    with pytest.raises(FileNotFoundError):
+        find_latest_run(tmp_path, "C++")
+    (tmp_path / "drift_c_20261019_090000_prompt.md").write_text("unidentified prompt")
+    with pytest.raises(FileNotFoundError):
+        find_latest_run(tmp_path, "C#")
 
 
 def test_render_agreement_flags_count_mismatch():

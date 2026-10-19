@@ -359,6 +359,21 @@ def test_selection_order_is_stable(tmp_path):
     assert first == second == sorted(first)
 
 
+@pytest.mark.parametrize("excluded", ["a-alias", "a-alias/*.pdf"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_excluded_alias_cannot_hide_an_included_pdf(tmp_path, excluded, nested):
+    from cda.corpus.ingest import select_pdfs
+
+    target = tmp_path / ("z-parent/papers" if nested else "z-papers")
+    target.mkdir(parents=True)
+    pdf = target / "paper.pdf"
+    pdf.write_bytes(b"%PDF-")
+    (tmp_path / "a-alias").symlink_to(target, target_is_directory=True)
+    (target / "cycle").symlink_to(tmp_path, target_is_directory=True)
+    kept, _ = select_pdfs(tmp_path, exclude=[excluded])
+    assert kept == [pdf]
+
+
 def test_cli_flags_add_to_configured_exclusions(tmp_path, monkeypatch):
     """A project config carries standing exclusions; a flag adds a one-off."""
     from cda.corpus.ingest import select_pdfs

@@ -54,7 +54,9 @@ def test_invalid_method_is_a_config_error():
         resolution_params(config)
 
 
-@pytest.mark.parametrize("bad", [1, 0, -3, "twelve"])
+@pytest.mark.parametrize(
+    "bad", [1, 0, -3, "twelve", 2.9, "2.9", True, False, float("nan"), float("inf")]
+)
 def test_invalid_k_is_a_config_error(bad):
     config = load_config(overrides={"clustering": {"k": bad}})
     with pytest.raises(ConfigError, match="clustering.k"):
