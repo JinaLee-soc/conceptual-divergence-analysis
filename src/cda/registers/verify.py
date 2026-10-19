@@ -94,7 +94,7 @@ def find_latest_run(output_dir: Path, term: str) -> tuple[Path, Path]:
     if output_dir.is_dir():
         for path in output_dir.iterdir():
             match = _RUN_REPORT.match(path.name)
-            if match is None or match.group("slug") != slug:
+            if match is None or match.group("slug") != slug or not path.is_file():
                 continue
             prompt = path.with_name(f"{path.stem}_prompt.md")
             if not prompt.exists():

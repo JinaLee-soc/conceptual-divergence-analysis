@@ -286,11 +286,16 @@ def test_demo_button_click_renders_visual_summary(monkeypatch):
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # mock toggle defaults on
     app = AppTest.from_file(APP_PATH, default_timeout=240).run()
+    # Select replay explicitly: another GUI test may leave a session key in
+    # Streamlit's context, and integration tests must never spend an API key.
+    next(t for t in app.toggle if t.label.startswith("Mock LLM")).set_value(True)
+    app.run()
     demo_button = app.button[0]  # the prominent "Try the demo" button
     demo_button.click()
     app.run(timeout=240)
 
     assert not app.exception, f"demo click raised: {app.exception}"
+    assert not app.error, [e.value for e in app.error]
     metric_labels = [m.label for m in app.metric]
     # Joint clustering is the default, so the headline metrics describe the
     # shared partition. (Under --independent they are the per-corpus k and

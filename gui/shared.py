@@ -145,17 +145,38 @@ def render_report_file(path: Path, key_prefix: str = "reports_tab") -> None:
     )
 
 
+def _public_progress(message: str) -> str | None:
+    """Public status text contains no raw paths, source names, or exception details."""
+    stages = {
+        "[corpus] another ingest or retrieval": "Waiting for another corpus operation to finish…",
+        "[corpus] removed a stale lock": "Recovered an interrupted corpus operation; continuing…",
+        "[demo] toy corpus:": "Preparing the toy literature corpus…",
+        "[demo] first run:": "Indexing the toy literature corpus…",
+        "[1/3]": "Extracting matching passages…",
+        "[2/3]": "Clustering passages…",
+        "[3/3]": "Assigning registers…",
+    }
+    return next((label for prefix, label in stages.items() if message.startswith(prefix)), None)
+
+
 def run_with_live_log(fn, *, status_label="Running…", failure_message=None, **kwargs):
     """Run a pipeline function, streaming its progress lines into the page.
 
     The session-entered API key (if any) is exposed to the provider layer
     only for the duration of this call. ``failure_message(exc)`` renders the
-    error shown on failure; by default it is the exception's text.
+    error shown on failure; by default it is the exception's text. In public
+    demo mode only fixed stage labels are streamed, never the raw log text.
     """
     log_box = st.status(status_label, expanded=True)
     lines: list[str] = []
 
     def progress(message: str) -> None:
+        if demo_mode_enabled():
+            message = _public_progress(message)
+            if message is None:
+                return
+        if lines and lines[-1] == message:
+            return
         lines.append(message)
         log_box.write(message)
 

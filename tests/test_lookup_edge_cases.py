@@ -326,3 +326,22 @@ def test_gui_resume_latest_shows_an_error_when_only_damaged_sessions_exist(tmp_p
     assert "validation_session_dir" not in app.session_state
     errors = " ".join(e.value for e in app.error)
     assert only.name in errors and "could not be loaded" in errors
+
+
+@pytest.mark.parametrize("payload", [[], None, "not a session", 3, True])
+def test_non_object_session_is_reported_and_skipped(tmp_path, payload):
+    good = _make_session(tmp_path, "novelty", datetime(2026, 10, 19, 9, 0, 0))
+    bad = _make_session(tmp_path, "novelty", datetime(2026, 10, 19, 10, 0, 0))
+    (bad / "session.json").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="JSON object"):
+        load_session(bad)
+    assert find_latest_session(tmp_path, "novelty") == good
+
+
+def test_find_latest_run_skips_a_directory_named_like_a_report(tmp_path):
+    _write_run(tmp_path, "novelty", OLD)
+    _write_run(tmp_path, "novelty", NEW)
+    report = tmp_path / f"drift_novelty_{NEW}.md"
+    report.unlink()
+    report.mkdir()
+    assert find_latest_run(tmp_path, "novelty")[1].name == f"drift_novelty_{OLD}.md"

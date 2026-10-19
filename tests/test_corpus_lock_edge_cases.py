@@ -491,3 +491,248 @@ def test_capped_keyword_retrieval_names_every_legacy_source(tmp_path, fake_embed
         keyword_hits(collection, "novelty", max_chunks=10, progress=_quiet)
     assert "alpha.pdf" in str(excinfo.value) and "beta.pdf" in str(excinfo.value)
     assert "gamma.pdf" not in str(excinfo.value)
+
+
+def test_stale_recovery_cannot_expose_a_live_holders_lock(tmp_path, monkeypatch):
+    """Pause a stale waiter while a second holder and then a third contender arrive."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    config = _config(tmp_path)
+    lock = _lock_file(config)
+    lock.write_text(f"{_dead_pid()}\n")
+    scanned, resume_scan, renamed, resume_rename, release = [threading.Event() for _ in range(5)]
+    observed = {name: threading.Event() for name in ("B", "C")}
+    local = threading.local()
+    state_lock = threading.Lock()
+    active, maximum = 0, 0
+    holder, rename = ing._lock_holder, os.rename
+
+    def pause_holder(path):
+        result = holder(path)
+        if getattr(local, "name", None) == "A" and result[2] and not scanned.is_set():
+            scanned.set()
+            assert resume_scan.wait(10)
+        return result
+
+    def pause_rename(source, destination):
+        result = rename(source, destination)
+        if getattr(local, "name", None) == "A" and Path(source) == lock:
+            renamed.set()
+            assert resume_rename.wait(10)
+        return result
+
+    def worker(name):
+        nonlocal active, maximum
+        local.name = name
+
+        def progress(message):
+            if name in observed and "waiting for it to finish" in message:
+                observed[name].set()
+
+        with corpus_lock(config, progress):
+            with state_lock:
+                active += 1
+                maximum = max(maximum, active)
+            if name in observed:
+                observed[name].set()
+            try:
+                assert release.wait(10)
+            finally:
+                with state_lock:
+                    active -= 1
+
+    monkeypatch.setattr(ing, "_lock_holder", pause_holder)
+    monkeypatch.setattr(ing.os, "rename", pause_rename)
+    monkeypatch.setattr(ing, "_INGEST_LOCK_TIMEOUT_SECONDS", 2)
+    monkeypatch.setattr(ing, "_INGEST_LOCK_POLL_SECONDS", 0.01)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(worker, "A")]
+        try:
+            assert scanned.wait(10)
+            futures.append(pool.submit(worker, "B"))
+            assert observed["B"].wait(10)
+            resume_scan.set()
+            assert renamed.wait(10)
+            futures.append(pool.submit(worker, "C"))
+            assert observed["C"].wait(10)
+        finally:
+            resume_scan.set()
+            resume_rename.set()
+            release.set()
+        errors = []
+        for future in futures:
+            try:
+                future.result(timeout=10)
+            except CorpusLockError as exc:
+                errors.append(exc)
+    assert maximum == 1, "stale recovery admitted overlapping corpus operations"
+    assert not errors
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["999999999999999999999", "²", "9" * 5000],
+    ids=["out-of-range", "unicode-digit", "oversized"],
+)
+def test_malformed_pid_is_recovered_after_the_stale_timeout(tmp_path, fast_lock, content):
+    config = _config(tmp_path)
+    lock = _lock_file(config)
+    lock.write_text(content)
+    old = time.time() - 10
+    os.utime(lock, (old, old))
+    with corpus_lock(config, _quiet):
+        assert lock.read_text().strip() == str(os.getpid())
+
+
+def test_failed_stale_recovery_obeys_the_lock_timeout(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    _lock_file(config).write_text(f"{_dead_pid()}\n")
+    calls = 0
+
+    def cannot_rename(*args):
+        nonlocal calls
+        calls += 1
+        assert calls < 3, "failed stale recovery retried without checking the deadline"
+        return False
+
+    monkeypatch.setattr(ing, "_reclaim_stale_lock", cannot_rename)
+    monkeypatch.setattr(ing, "_INGEST_LOCK_TIMEOUT_SECONDS", 0)
+    with pytest.raises(CorpusLockError):
+        with corpus_lock(config, _quiet):
+            pass
+
+
+def test_process_crash_releases_guard_and_recovers_pid_file(tmp_path):
+    config = _config(tmp_path)
+    code = """
+import os, sys
+from cda.config import load_config
+from cda.corpus.ingest import corpus_lock
+config = load_config(overrides={"paths": {"corpus_dir": sys.argv[1]}})
+with corpus_lock(config, lambda _: None):
+    os._exit(0)
+"""
+    subprocess.run(
+        [sys.executable, "-c", code, str(config.path("paths.corpus_dir"))], check=True, timeout=15
+    )
+    assert _lock_file(config).exists()
+    with corpus_lock(config, _quiet):
+        pass
+    assert not _lock_file(config).exists()
+
+
+def test_separate_process_cannot_enter_a_held_corpus(tmp_path):
+    config = _config(tmp_path)
+    code = """
+import sys
+from cda.config import load_config
+import cda.corpus.ingest as ing
+ing._INGEST_LOCK_TIMEOUT_SECONDS = 0.05
+ing._INGEST_LOCK_POLL_SECONDS = 0.01
+config = load_config(overrides={"paths": {"corpus_dir": sys.argv[1]}})
+try:
+    with ing.corpus_lock(config, lambda _: None):
+        sys.exit(1)
+except ing.CorpusLockError:
+    pass
+"""
+    with corpus_lock(config, _quiet):
+        subprocess.run(
+            [sys.executable, "-c", code, str(config.path("paths.corpus_dir"))],
+            check=True,
+            timeout=15,
+        )
+
+
+def test_windows_access_denied_means_the_holder_is_alive(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+
+    class Function:
+        def __init__(self, result):
+            self.result = result
+
+        def __call__(self, *args):
+            return self.result
+
+    kernel = SimpleNamespace(
+        OpenProcess=Function(0), GetExitCodeProcess=Function(0), CloseHandle=Function(1)
+    )
+    last_error_enabled = False
+
+    def dll(name, *, use_last_error):
+        nonlocal last_error_enabled
+        last_error_enabled = use_last_error
+        return kernel
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ing.sys, "platform", "win32")
+        patch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel), raising=False)
+        patch.setattr(ctypes, "WinDLL", dll, raising=False)
+        patch.setattr(
+            ctypes, "get_last_error", lambda: 5 if last_error_enabled else 0, raising=False
+        )
+        assert ing._process_alive(1234)
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "no_text"])
+def test_prune_keeps_alias_source_when_canonical_refresh_fails(
+    tmp_path, fake_embedder, text_pdfs, linked_library, monkeypatch, failure
+):
+    config = _config(tmp_path)
+    ing.ingest_pdf_dir(config, fake_embedder, linked_library, progress=_quiet)
+    _store_under_link_route(config)
+    before = get_collection(config).get(
+        where={"pdf_relpath": "shortcuts/c/secret.pdf"}, include=["documents", "metadatas"]
+    )
+    extract = ing.extract_pdf_text
+
+    def failed_extract(path):
+        if path.name == "secret.pdf":
+            if failure == "unreadable":
+                raise ValueError("damaged PDF")
+            return ""
+        return extract(path)
+
+    monkeypatch.setattr(ing, "extract_pdf_text", failed_extract)
+    messages = []
+    stats = ing.ingest_pdf_dir(
+        config, fake_embedder, linked_library, prune_missing=True, progress=messages.append
+    )
+    after = get_collection(config).get(
+        where={"pdf_relpath": "shortcuts/c/secret.pdf"}, include=["documents", "metadatas"]
+    )
+    assert after == before
+    assert stats["pdfs_pruned"] == 0
+    assert any("replacement" in m and "retained" in m for m in messages)
+
+
+@pytest.mark.parametrize("mode", ["demo", "own_text"])
+def test_public_progress_never_exposes_server_paths(monkeypatch, mode):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    import cda.demo
+
+    def failed_demo(**kwargs):
+        kwargs["progress"]("[demo] toy corpus: /srv/private/host/demo/toy_corpus")
+        kwargs["progress"](
+            f"[corpus] another ingest or retrieval is running (lock file: {HOST_LOCK}); waiting for it to finish…"
+        )
+        raise CorpusLockError(f"Another run holds {HOST_LOCK}")
+
+    monkeypatch.setenv("CDA_DEMO_MODE", "1")
+    monkeypatch.setattr(cda.demo, "run_demo", failed_demo)
+    app = AppTest.from_file(APP_PATH, default_timeout=60).run()
+    if mode == "demo":
+        _click_demo(app)
+    else:
+        next(t for t in app.text_area if t.label == "Your paragraphs").set_value(
+            "Novelty means a new approach."
+        )
+        app.run()
+        next(b for b in app.button if "no model API" in b.label).click().run()
+    assert not app.exception
+    page = " ".join(m.value for m in app.markdown) + " ".join(e.value for e in app.error)
+    assert "/srv/private" not in page
+    assert "Another run holds the corpus" in page

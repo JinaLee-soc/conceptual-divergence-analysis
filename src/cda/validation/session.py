@@ -187,6 +187,11 @@ def load_session(session_dir: Path) -> dict:
             "writer never leaves partial files, so this did not come from an "
             "interrupted save."
         ) from exc
+    if not isinstance(session, dict):
+        raise ValueError(
+            f"{path} must contain a JSON object, got {type(session).__name__}. "
+            "Restore the session record from a backup or start a new session."
+        )
     if session.get("schema") != SCHEMA:
         raise ValueError(
             f"{path} has schema {session.get('schema')!r}, expected {SCHEMA!r}. "

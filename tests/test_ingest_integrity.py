@@ -437,7 +437,22 @@ def _fake_sentence_transformers(monkeypatch, loaded: list):
     )
 
 
-def test_provenance_resolves_the_snapshot_in_sentence_transformers_home(tmp_path, monkeypatch):
+@pytest.fixture
+def isolated_hf_cache(tmp_path, monkeypatch):
+    # Load the module before changing its environment-derived defaults, then
+    # restore the module value as well as the environment after the test.
+    # Otherwise the first import can strand later integration tests in this
+    # temporary, empty cache even after monkeypatch restores os.environ.
+    from huggingface_hub import constants
+
+    cache = str(tmp_path / "default_cache")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", cache)
+    monkeypatch.setenv("HF_HUB_CACHE", cache)
+
+
+def test_provenance_resolves_the_snapshot_in_sentence_transformers_home(
+    tmp_path, monkeypatch, isolated_hf_cache
+):
     from cda.corpus.embeddings import SentenceTransformerEmbedder
 
     revision = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -447,7 +462,6 @@ def test_provenance_resolves_the_snapshot_in_sentence_transformers_home(tmp_path
     (repo / "refs").mkdir()
     (repo / "refs" / "main").write_text(revision)
     monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(tmp_path / "st_home"))
-    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "default_cache"))
     loaded: list = []
     _fake_sentence_transformers(monkeypatch, loaded)
 
@@ -459,11 +473,10 @@ def test_provenance_resolves_the_snapshot_in_sentence_transformers_home(tmp_path
     assert list(result["files"]) == ["config.json"]
 
 
-def test_unresolvable_provenance_is_recorded_not_raised(tmp_path, monkeypatch):
+def test_unresolvable_provenance_is_recorded_not_raised(tmp_path, monkeypatch, isolated_hf_cache):
     from cda.corpus.embeddings import SentenceTransformerEmbedder
 
     monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(tmp_path / "empty_home"))
-    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "default_cache"))
     _fake_sentence_transformers(monkeypatch, [])
     embedder = SentenceTransformerEmbedder("org/model")
     embedder.embed(["hello"])

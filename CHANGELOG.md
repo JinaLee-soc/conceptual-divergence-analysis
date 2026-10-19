@@ -5,6 +5,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Recovery and public-demo safeguards
+
+- Corpus access now holds a persistent OS lock during stale lock-file
+  recovery as well as ingestion and retrieval. Concurrent recovery cannot
+  move an active holder's lock aside. Failed recovery obeys the timeout;
+  malformed PID records and Windows access-denied checks are handled safely.
+- `--prune-missing` retains a source stored under a symlink route if its
+  canonical replacement could not be read or stored. The warning identifies
+  the retained source; deliberate exclusions still take effect.
+- Public demo progress shows fixed stage labels and lock-wait notices,
+  without server paths or raw diagnostic text. Local logs remain detailed.
+- Validation lookup rejects non-object JSON session records with a readable
+  error and skips them when another intact session exists. Report lookup
+  ignores directories whose names happen to match report filenames.
+
 ### Lock, exclusion and lookup repairs
 
 - `cda verify` no longer fails because an older run for the same term has a

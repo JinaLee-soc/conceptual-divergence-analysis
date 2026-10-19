@@ -208,6 +208,17 @@ before trusting the corpus.
 
 ### Changes to stored inputs
 
+Corpus operations share a lock, including recovery after a crash. The
+`.ingest.guard` file inside the Chroma directory is permanent; its presence
+does not mean an operation is running. Do not remove it while using CDA.
+The operating system releases its lock when a process exits. A leftover
+`.ingest.lock` PID record is checked and recovered on the next operation.
+
+When an older corpus stores a PDF under a symlink route, CDA migrates it to
+the canonical route. If that refresh fails, `--prune-missing` retains the
+previous copy and reports it. Sources deliberately excluded from the corpus
+can still be pruned.
+
 Ordinary ingestion refreshes changed chunk settings as well as source text.
 For JSONL ingestion, changes to year, title, DOI, tags, authorship or acquisition
 metadata also trigger refresh, including removal of a previously supplied field.

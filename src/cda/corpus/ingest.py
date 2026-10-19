@@ -9,6 +9,7 @@ resolved per file at ingest time, so analysis runs never need Zotero.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -232,13 +233,20 @@ def _process_alive(pid: int) -> bool:
         # os.kill on Windows terminates the target for any signal but the two
         # console events, so liveness is read from a query-only handle.
         import ctypes
+        from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
             return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: exists, not ours
         try:
-            code = ctypes.c_ulong()
+            code = wintypes.DWORD()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
                 return True
             return code.value == 259  # STILL_ACTIVE
@@ -264,18 +272,22 @@ def _lock_holder(lock_path: Path) -> tuple[int | None, str, bool]:
         modified = lock_path.stat().st_mtime
     except OSError:
         return None, "", False
-    if content.isdigit():
+    if content.isascii() and content.isdecimal() and len(content) <= 10:
         pid = int(content)
-        return pid, content, not _process_alive(pid)
+        if pid > 0:
+            try:
+                return pid, content, not _process_alive(pid)
+            except OverflowError:
+                pass  # outside this platform's PID range: treat as a malformed record
     return None, content, time.time() - modified > _INGEST_LOCK_TIMEOUT_SECONDS
 
 
 def _reclaim_stale_lock(lock_path: Path, expected: str) -> bool:
     """Remove a lock file whose holder is gone; returns whether this caller removed it.
 
-    The file is renamed before it is removed, so of several waiters that read
-    the same dead pid only one reclaims it. A rename that caught a fresh lock
-    taken in between (its content differs from what was read) is undone.
+    The caller must hold the persistent OS guard across the stale check,
+    this rename, acquisition, and release. Renaming alone is insufficient:
+    another waiter could otherwise acquire the temporarily absent pathname.
     """
     claimed = lock_path.with_name(f"{lock_path.name}.stale-{os.getpid()}-{time.monotonic_ns()}")
     try:
@@ -291,6 +303,54 @@ def _reclaim_stale_lock(lock_path: Path, expected: str) -> bool:
         return False
     claimed.unlink(missing_ok=True)
     return True
+
+
+def _wait_for_corpus_lock(lock_path, deadline, progress, announced):
+    if not announced:
+        progress(
+            "[corpus] another ingest or retrieval is running on this corpus "
+            f"(lock file: {lock_path}); waiting for it to finish…"
+        )
+    if time.monotonic() >= deadline:
+        raise CorpusLockError(
+            f"Another ingest or retrieval still holds {lock_path} after "
+            f"{_INGEST_LOCK_TIMEOUT_SECONDS}s. Let the other corpus operation finish and retry. "
+            "If no operation is running, a legacy lock file may remain; remove only "
+            f"{lock_path.name} and retry. Leave .ingest.guard in place."
+        )
+    time.sleep(_INGEST_LOCK_POLL_SECONDS)
+    return True
+
+
+@contextmanager
+def _corpus_guard(lock_path, deadline, progress):
+    """Hold an OS lock on a persistent inode, including during stale PID-file recovery.
+
+    Closing the descriptor releases the guard even after a process crash.
+    Its file must never be unlinked: all waiters must lock the same inode.
+    """
+    fd = os.open(lock_path.with_name(".ingest.guard"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        announced = False
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK):
+                    raise
+                announced = _wait_for_corpus_lock(lock_path, deadline, progress, announced)
+        yield
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -311,44 +371,35 @@ def corpus_lock(config: Config, progress: Callable[[str], None]):
     store_dir.mkdir(parents=True, exist_ok=True)
     lock_path = store_dir / ".ingest.lock"
     deadline = time.monotonic() + _INGEST_LOCK_TIMEOUT_SECONDS
-    announced = False
-    while True:
+    with _corpus_guard(lock_path, deadline, progress):
+        announced = False
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                pid, content, stale = _lock_holder(lock_path)
+                if stale:
+                    if _reclaim_stale_lock(lock_path, content):
+                        progress(
+                            "[corpus] removed a stale lock file left by "
+                            + (
+                                f"process {pid}, which is no longer running"
+                                if pid
+                                else "a crashed run"
+                            )
+                            + f" ({lock_path}); continuing"
+                        )
+                        continue
+                announced = _wait_for_corpus_lock(lock_path, deadline, progress, announced)
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            pid, content, stale = _lock_holder(lock_path)
-            if stale:
-                if _reclaim_stale_lock(lock_path, content):
-                    progress(
-                        "[corpus] removed a stale lock file left by "
-                        + (f"process {pid}, which is no longer running" if pid else "a crashed run")
-                        + f" ({lock_path}); continuing"
-                    )
-                continue
-            if not announced:
-                progress(
-                    "[corpus] another ingest or retrieval is running on this corpus "
-                    f"(lock file: {lock_path}); waiting for it to finish…"
-                )
-                announced = True
-            if time.monotonic() >= deadline:
-                raise CorpusLockError(
-                    f"Another ingest or retrieval still holds {lock_path} after "
-                    f"{_INGEST_LOCK_TIMEOUT_SECONDS}s. If a corpus operation is running in "
-                    "another window (GUI or CLI), let it finish and rerun. If "
-                    "none is — a previous ingest crashed before cleaning up — "
-                    "it is safe to delete that lock file and rerun."
-                ) from None
-            time.sleep(_INGEST_LOCK_POLL_SECONDS)
-    try:
-        try:
-            os.write(fd, f"{os.getpid()}\n".encode())
+            try:
+                os.write(fd, f"{os.getpid()}\n".encode())
+            finally:
+                os.close(fd)
+            yield
         finally:
-            os.close(fd)
-        yield
-    finally:
-        lock_path.unlink(missing_ok=True)
+            lock_path.unlink(missing_ok=True)
 
 
 def _ingest_state(collection, identity: str, current: dict | None = None) -> tuple[str, str]:
@@ -927,6 +978,25 @@ def _handle_missing(
     )
     excluded = _excluded_sources(collection, pdf_dir, pdf_root, exclude, recursive)
     aliased = _alias_sources(collection, pdf_dir, pdf_root, exclude, recursive)
+    retained = []
+    removable = []
+    for relpath in aliased:
+        canonical = _canonical_relpath(pdf_dir, relpath)
+        try:
+            digest = file_digest(pdf_dir / canonical)
+        except OSError:
+            retained.append(relpath)
+            continue
+        state, _ = _ingest_state(collection, canonical, {"source_file_sha256": digest})
+        (removable if state == "complete" else retained).append(relpath)
+    aliased = removable
+    if retained:
+        stats["pdfs_kept_previous"] += len(retained)
+        progress(
+            "[warn] canonical replacement could not be stored; previous versions retained "
+            "under their symlink routes (not pruned):\n"
+            + "\n".join(f"    {relpath}" for relpath in retained)
+        )
     stats["pdfs_missing"] = len(missing) + len(aliased)
     stats["pdfs_stored_excluded"] = len(excluded)
     stats["pdfs_root_unknown"] = len(root_unknown)
