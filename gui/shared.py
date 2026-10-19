@@ -168,16 +168,20 @@ def run_with_live_log(fn, *, status_label="Running…", failure_message=None, **
     demo mode only fixed stage labels are streamed, never the raw log text.
     """
     log_box = st.status(status_label, expanded=True)
-    lines: list[str] = []
+    public = demo_mode_enabled()
+    last_label: str | None = None
 
     def progress(message: str) -> None:
-        if demo_mode_enabled():
+        nonlocal last_label
+        if public:
+            # Several raw lines map onto one stage label (every "[1/3]" line,
+            # every lock poll), so a label repeating back to back carries no
+            # information. Locally every line is shown: a repeated sentence
+            # is a real repeat (one per file, per spelling, per batch).
             message = _public_progress(message)
-            if message is None:
+            if message is None or message == last_label:
                 return
-        if lines and lines[-1] == message:
-            return
-        lines.append(message)
+            last_label = message
         log_box.write(message)
 
     try:

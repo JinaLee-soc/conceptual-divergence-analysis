@@ -212,11 +212,24 @@ Corpus operations share a lock, including recovery after a crash. The
 `.ingest.guard` file inside the Chroma directory is permanent; its presence
 does not mean an operation is running. Do not remove it while using CDA.
 The operating system releases its lock when a process exits. A leftover
-`.ingest.lock` PID record is checked and recovered on the next operation.
+`.ingest.lock` PID record is checked and recovered on the next operation,
+including a record of the running process's own id (a container restarted
+as PID 1) and an entry that is not a readable file. The guard is created
+world-readable (your umask applies) and opened read-only, so other OS users
+of a shared corpus can lock it too; if it was created without read access
+for them, CDA names the file, its owner and the `chmod` to run. On a
+filesystem that refuses OS file locks (some network and container mounts)
+CDA says so once and serializes operations through the `.ingest.lock` PID
+file alone, as earlier versions did.
 
 When an older corpus stores a PDF under a symlink route, CDA migrates it to
-the canonical route. If that refresh fails, `--prune-missing` retains the
-previous copy and reports it. Sources deliberately excluded from the corpus
+the canonical route. If the canonical file exists but could not be stored
+(unreadable, no text, or a failed refresh), the previous copy is retained
+under its route and reported, whether or not `--prune-missing` is given. If
+the canonical file is gone, the route is a missing source; if the file is
+stored under its own path or elsewhere, the route is a duplicate or an older
+version, reported separately from missing files in the `[done]` line and
+removed by `--prune-missing`. Sources deliberately excluded from the corpus
 can still be pruned.
 
 Ordinary ingestion refreshes changed chunk settings as well as source text.

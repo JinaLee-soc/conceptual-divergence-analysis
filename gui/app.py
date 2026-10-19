@@ -288,6 +288,12 @@ config = build_config(corpus_dir, drafts_dir, output_dir)
 #     in order; each is small enough to read on its own) ----------------------
 
 
+# The public wording for a corpus-lock failure. It must stay generic: the
+# error's own text names the lock file on the host, and the condition is not
+# only "another run holds the corpus" (see _demo_failure_message).
+DEMO_CORPUS_UNAVAILABLE = "The demo cannot reach its corpus right now; please retry."
+
+
 def _demo_failure_message(exc: Exception, term: str) -> str:
     """Explain a demo failure in terms a visitor can act on.
 
@@ -302,11 +308,14 @@ def _demo_failure_message(exc: Exception, term: str) -> str:
     from cda.llm.base import FixtureMissError
 
     if isinstance(exc, CorpusLockError):
-        # The toy corpus is shared by every visitor; a wait that ran out is
-        # a transient condition the visitor can act on, so it is explained
-        # in both modes (its text names the lock file, so publicly without).
+        # A lock error is transient and the visitor can act on it (retry),
+        # so it is explained in both modes; locally with its text, which
+        # names the lock file. Publicly the wording stays generic: the error
+        # is raised for more than another run holding the corpus (a lock
+        # that could not be reclaimed, a store directory that cannot be
+        # written), and none of those causes is the visitor's to diagnose.
         if DEMO_MODE:
-            return "Another run holds the corpus; please retry in a moment."
+            return DEMO_CORPUS_UNAVAILABLE
         return str(exc)
     if not isinstance(exc, FixtureMissError):
         if DEMO_MODE:
@@ -339,8 +348,14 @@ def _own_text_failure_message(exc: Exception) -> str:
     act on, so it is named (without the path).
     """
     if isinstance(exc, CorpusLockError):
-        return "Another run holds the corpus; please retry in a moment." if DEMO_MODE else str(exc)
+        return DEMO_CORPUS_UNAVAILABLE if DEMO_MODE else str(exc)
     return f"The preview failed ({type(exc).__name__})." if DEMO_MODE else str(exc)
+
+
+def _passages_found(result: dict) -> str:
+    """`` (passages found: N)`` when the skipped result counted them, else empty."""
+    found = (result.get("stats") or {}).get("researcher_passages")
+    return f" (passages found: {found})" if found is not None else ""
 
 
 def _own_text_skip_message(result: dict, term: str) -> str:
@@ -353,12 +368,27 @@ def _own_text_skip_message(result: dict, term: str) -> str:
     """
     if not DEMO_MODE:
         return result.get("reason", str(result))
-    found = (result.get("stats") or {}).get("researcher_passages")
-    count = f" (passages found: {found})" if found is not None else ""
     return (
         f"Your pasted text does not contain the term *{term}* often enough to "
-        f"analyze{count}. Paste paragraphs that use *{term}*, or "
+        f"analyze{_passages_found(result)}. Paste paragraphs that use *{term}*, or "
         "pick the other term."
+    )
+
+
+def _demo_skip_message(result: dict, term: str) -> str:
+    """The notice for a toy-corpus demo run that produced no analysis.
+
+    Same rule as ``_own_text_skip_message``: the pipeline's reason names the
+    host's drafts directory, so the public demo shows a fixed sentence and
+    only the local app shows the reason itself (there the path is the
+    actionable detail).
+    """
+    if not DEMO_MODE:
+        return result.get("reason", str(result))
+    return (
+        f"The demo found too few passages for *{term}* in the toy drafts to "
+        f"analyze{_passages_found(result)}. Try the other term, or install CDA "
+        "and run the demo locally."
     )
 
 
@@ -483,7 +513,7 @@ def render_demo_button(mock_llm: bool, output_dir: str) -> None:
         st.success("Demo complete. Results show the divergence built into the toy corpus.")
         _show_result_tabs(result, key_prefix="demo_result")
     elif result:
-        st.warning(result.get("reason", str(result)))
+        st.warning(_demo_skip_message(result, result.get("term", demo_term)))
 
 
 def render_own_text_panel(key_ok: bool) -> None:

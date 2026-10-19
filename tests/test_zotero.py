@@ -713,31 +713,38 @@ def test_a_held_ingest_lock_is_waited_on_then_reported(tmp_path, fake_embedder, 
     and both added; Chroma silently kept the existing rows and the landed-count
     check raised a corpus-corruption-shaped error for a transient race. The
     lockfile serializes them; a lock that never clears must name itself.
-    The holder here is a live process (this one): a lock whose process is
-    gone is reclaimed instead (see test_corpus_lock_edge_cases)."""
-    import os
+    The holder here is a live process other than this one (a record of this
+    very pid is known to be stale once the guard is held, and a lock whose
+    process is gone is reclaimed; see test_corpus_lock_edge_cases)."""
+    import subprocess
+    import sys
 
     import cda.corpus.ingest as ing
     from cda.config import load_config
 
     corpus_dir = tmp_path / "corpus"
     (corpus_dir / "chroma").mkdir(parents=True)
-    (corpus_dir / "chroma" / ".ingest.lock").write_text(f"{os.getpid()}\n")
-    monkeypatch.setattr(ing, "_INGEST_LOCK_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr(ing, "_INGEST_LOCK_POLL_SECONDS", 0.01)
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (corpus_dir / "chroma" / ".ingest.lock").write_text(f"{holder.pid}\n")
+        monkeypatch.setattr(ing, "_INGEST_LOCK_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(ing, "_INGEST_LOCK_POLL_SECONDS", 0.01)
 
-    config = load_config(overrides={"paths": {"corpus_dir": str(corpus_dir)}})
-    messages: list[str] = []
-    with pytest.raises(RuntimeError, match="ingest.lock"):
-        ing.ingest_records(
-            config,
-            fake_embedder,
-            [{"source": "a.txt", "abstract": "word " * 100}],
-            progress=messages.append,
-        )
-    assert any("another ingest" in m.lower() for m in messages)
-    # A live holder's lock is not cleaned up by the waiter: it belongs to the holder.
-    assert (corpus_dir / "chroma" / ".ingest.lock").exists()
+        config = load_config(overrides={"paths": {"corpus_dir": str(corpus_dir)}})
+        messages: list[str] = []
+        with pytest.raises(RuntimeError, match="ingest.lock"):
+            ing.ingest_records(
+                config,
+                fake_embedder,
+                [{"source": "a.txt", "abstract": "word " * 100}],
+                progress=messages.append,
+            )
+        assert any("another ingest" in m.lower() for m in messages)
+        # A live holder's lock is not cleaned up by the waiter: it belongs to the holder.
+        assert (corpus_dir / "chroma" / ".ingest.lock").read_text().strip() == str(holder.pid)
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_the_ingest_lock_is_released_after_a_run(tmp_path, fake_embedder):

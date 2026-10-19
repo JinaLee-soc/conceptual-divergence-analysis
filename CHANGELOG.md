@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Lock portability and symlink-route retention
+
+- The public demo no longer renders the pipeline's skip reason, which names
+  the host's drafts directory; it shows a fixed, path-free notice, and a
+  corpus-lock failure is reported as "The demo cannot reach its corpus right
+  now; please retry." The local app still shows the full text.
+- The live log in the local app streams every line again; only the public
+  demo collapses repeated stage labels.
+- Corpus operations no longer fail on filesystems that refuse OS file locks
+  (some NFS, SMB, FUSE and container mounts): CDA says so once and serializes
+  runs through the `.ingest.lock` PID file alone, as earlier versions did.
+- The `.ingest.guard` file is created world-readable (umask applies) and
+  opened read-only, so other OS users of a shared corpus can lock it; a guard
+  that cannot be opened is reported with its owner and the `chmod` to run.
+- A `.ingest.lock` recording the running process's own pid (a container
+  restarted as PID 1), or an entry that is a directory or unreadable file, is
+  reclaimed once the guard is held instead of stalling every operation for the
+  full timeout.
+- A source stored under a symlink route is retained only while its canonical
+  file exists but could not be stored, with or without `--prune-missing`. A
+  route whose file is gone is a missing source; one whose file is stored under
+  its own path or elsewhere is a duplicate or an older version, counted
+  separately in the `[done]` line (`pdfs_aliased`) and removed by
+  `--prune-missing`. The canonical file is hashed once per run by its on-disk
+  path.
 ### Recovery and public-demo safeguards
 
 - Corpus access now holds a persistent OS lock during stale lock-file

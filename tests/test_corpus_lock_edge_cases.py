@@ -128,22 +128,53 @@ def test_prune_removes_an_excluded_source_instead_of_renaming_it_to_a_link_route
     assert _stored(config) == {"public.pdf"}
 
 
-def _store_under_link_route(config):
-    """Rewrite the stored identity to the link route, as an older version stored it."""
-    collection = get_collection(config)
-    result = collection.get(where={"pdf_relpath": "confidential/secret.pdf"}, include=["metadatas"])
-    collection.update(
-        ids=result["ids"],
-        metadatas=[dict(m, pdf_relpath="shortcuts/c/secret.pdf") for m in result["metadatas"]],
+def _store_under_link_route(config, embedder, library: Path) -> None:
+    """Ingest the library as an older version stored it: secret.pdf under its link route.
+
+    Older versions selected a file by whichever route reached it first, so a
+    real legacy store holds ``shortcuts/c/secret.pdf`` as the relpath AND
+    derives the chunk ids from that route. Rewriting ``pdf_relpath`` on rows
+    whose ids were keyed to ``confidential/secret.pdf`` would invent a store
+    no version ever wrote (and hide every id-collision path from the tests).
+    The link route is made the only route for the ingest by moving the real
+    folder out of the library, then the layout is restored as the tests
+    expect it: ``confidential/secret.pdf`` with ``shortcuts/c`` linking to it.
+    """
+    confidential = library / "confidential"
+    hidden = library.parent / "confidential_elsewhere"
+    link = library / "shortcuts" / "c"
+    confidential.rename(hidden)
+    link.unlink()
+    os.symlink(hidden, link, target_is_directory=True)
+    ing.ingest_pdf_dir(config, embedder, library, progress=_quiet)
+    link.unlink()
+    hidden.rename(confidential)
+    os.symlink("../confidential", link)
+    assert _stored(config) == {"shortcuts/c/secret.pdf", "public.pdf"}
+
+
+def test_legacy_fixture_keys_chunk_ids_to_the_link_route(
+    tmp_path, fake_embedder, text_pdfs, linked_library
+):
+    """The fixture is a faithful legacy store: ids and relpath both derive from the route."""
+    config = _config(tmp_path)
+    _store_under_link_route(config, fake_embedder, linked_library)
+    result = get_collection(config).get(
+        where={"pdf_relpath": "shortcuts/c/secret.pdf"}, include=["metadatas"]
     )
+    assert result["ids"]
+    assert all(
+        i.startswith(ing._relpath_key("shortcuts/c/secret.pdf") + "::") for i in result["ids"]
+    )
+    assert not any(i.startswith(ing._relpath_key("confidential/secret.pdf")) for i in result["ids"])
+    assert all(m["pdf_root"] == str(linked_library.resolve()) for m in result["metadatas"])
 
 
 def test_source_stored_under_a_link_route_is_renamed_to_its_canonical_relpath(
     tmp_path, fake_embedder, text_pdfs, linked_library
 ):
     config = _config(tmp_path)
-    ing.ingest_pdf_dir(config, fake_embedder, linked_library, progress=_quiet)
-    _store_under_link_route(config)
+    _store_under_link_route(config, fake_embedder, linked_library)
     assert _stored(config) == {"shortcuts/c/secret.pdf", "public.pdf"}
     messages: list[str] = []
     stats = ing.ingest_pdf_dir(config, fake_embedder, linked_library, progress=messages.append)
@@ -156,8 +187,7 @@ def test_source_stored_under_a_link_route_is_pruned_when_its_file_is_excluded(
     tmp_path, fake_embedder, text_pdfs, linked_library
 ):
     config = _config(tmp_path)
-    ing.ingest_pdf_dir(config, fake_embedder, linked_library, progress=_quiet)
-    _store_under_link_route(config)
+    _store_under_link_route(config, fake_embedder, linked_library)
     stats = ing.ingest_pdf_dir(
         config,
         fake_embedder,
@@ -235,16 +265,24 @@ def test_fresh_empty_lock_is_waited_on_before_it_counts_as_stale(tmp_path, fast_
     assert any("stale lock" in m and "crashed run" in m for m in messages)
 
 
-@pytest.mark.parametrize("holder", ["own", "child"])
-def test_lock_of_a_live_process_is_waited_on_then_reported(tmp_path, fast_lock, holder):
+def test_lock_recording_this_process_is_reclaimed_under_the_guard(tmp_path, fast_lock):
+    """A record of this very pid cannot be a live holder once the guard is held:
+    a process is never inside the region and entering it at once. Docker leaves
+    such records ("1") when the container is stopped mid-run."""
+    config = _config(tmp_path)
+    _lock_file(config).write_text(f"{os.getpid()}\n")
+    messages: list[str] = []
+    with corpus_lock(config, messages.append):
+        pass
+    assert any("stale lock" in m for m in messages)
+    assert not _lock_file(config).exists()
+
+
+def test_lock_of_a_live_process_is_waited_on_then_reported(tmp_path, fast_lock):
     config = _config(tmp_path)
     lock = _lock_file(config)
-    child = None
-    if holder == "child":
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        pid = child.pid
-    else:
-        pid = os.getpid()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    pid = child.pid
     lock.write_text(f"{pid}\n")
     messages: list[str] = []
     try:
@@ -266,12 +304,16 @@ def test_cli_reports_a_held_lock_without_a_traceback(
     tmp_path, fast_lock, text_pdfs, fake_embedder, monkeypatch, capsys
 ):
     config = _config(tmp_path)
-    _lock_file(config).write_text(f"{os.getpid()}\n")
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    _lock_file(config).write_text(f"{holder.pid}\n")
     library = tmp_path / "pdfs"
     library.mkdir()
     (library / "paper.pdf").write_text("Novelty is waited on.")
     monkeypatch.setattr("cda.corpus.embeddings.get_embedder", lambda config: fake_embedder)
-    code = main(["ingest", "--pdf-dir", str(library), "--corpus-dir", str(tmp_path / "corpus")])
+    try:
+        code = main(["ingest", "--pdf-dir", str(library), "--corpus-dir", str(tmp_path / "corpus")])
+    finally:
+        holder.kill()
     assert code == 1
     err = capsys.readouterr().err
     assert "error:" in err and "ingest.lock" in err and "Traceback" not in err
@@ -368,10 +410,14 @@ def test_run_demo_surfaces_a_lock_timeout(tmp_path, fake_embedder, monkeypatch, 
     demo_dir = _toy_demo_dir(tmp_path)
     monkeypatch.setattr(cda.demo, "get_embedder", lambda config: fake_embedder)
     config = cda.demo.demo_config(demo_dir)
-    _lock_file(config).write_text(f"{os.getpid()}\n")
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    _lock_file(config).write_text(f"{holder.pid}\n")
     lines: list[str] = []
-    with pytest.raises(CorpusLockError):
-        cda.demo.run_demo(term="novelty", mock=True, demo_dir=demo_dir, progress=lines.append)
+    try:
+        with pytest.raises(CorpusLockError):
+            cda.demo.run_demo(term="novelty", mock=True, demo_dir=demo_dir, progress=lines.append)
+    finally:
+        holder.kill()
     assert any("waiting for it to finish" in m for m in lines)
 
 
@@ -420,7 +466,7 @@ def test_gui_public_demo_names_a_lock_timeout_without_the_host_path(monkeypatch)
     _click_demo(app)
     assert not app.exception, f"GUI raised: {app.exception}"
     errors = " ".join(e.value for e in app.error)
-    assert "Another run holds the corpus; please retry in a moment." in errors
+    assert "The demo cannot reach its corpus right now; please retry." in errors
     assert HOST_LOCK not in errors and "/srv/" not in errors
     assert "The demo failed on this server" not in errors
 
@@ -680,8 +726,7 @@ def test_prune_keeps_alias_source_when_canonical_refresh_fails(
     tmp_path, fake_embedder, text_pdfs, linked_library, monkeypatch, failure
 ):
     config = _config(tmp_path)
-    ing.ingest_pdf_dir(config, fake_embedder, linked_library, progress=_quiet)
-    _store_under_link_route(config)
+    _store_under_link_route(config, fake_embedder, linked_library)
     before = get_collection(config).get(
         where={"pdf_relpath": "shortcuts/c/secret.pdf"}, include=["documents", "metadatas"]
     )
@@ -735,4 +780,4 @@ def test_public_progress_never_exposes_server_paths(monkeypatch, mode):
     assert not app.exception
     page = " ".join(m.value for m in app.markdown) + " ".join(e.value for e in app.error)
     assert "/srv/private" not in page
-    assert "Another run holds the corpus" in page
+    assert "The demo cannot reach its corpus right now; please retry." in page

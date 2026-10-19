@@ -282,6 +282,54 @@ def _lock_holder(lock_path: Path) -> tuple[int | None, str, bool]:
     return None, content, time.time() - modified > _INGEST_LOCK_TIMEOUT_SECONDS
 
 
+def _unreadable_lock_age(lock_path: Path) -> float | None:
+    """Seconds since a lock entry that cannot be read as a file was last changed.
+
+    ``None`` when the entry is readable (a holder's PID record, however
+    malformed, is judged by ``_lock_holder``) or no longer exists. A
+    directory, a dangling link, or a file this user may not read is never a
+    holder's record: a holder writes a plain file that it created itself.
+    """
+    try:
+        lock_path.read_bytes()
+        return None
+    except OSError:
+        pass
+    try:
+        return time.time() - os.lstat(lock_path).st_mtime
+    except OSError:
+        return None
+
+
+def _discard_unreadable_lock(lock_path: Path) -> str:
+    """Move an unreadable lock entry aside and remove it; returns what was done.
+
+    The caller must hold the OS guard, so no holder can be writing the
+    entry. A directory is moved aside before removal so the pathname is
+    free at once; one that cannot be removed stays aside under its new
+    name, which the note reports. An entry that cannot even be moved raises
+    ``CorpusLockError`` naming it.
+    """
+    aside = lock_path.with_name(f"{lock_path.name}.stale-{os.getpid()}-{time.monotonic_ns()}")
+    try:
+        os.rename(lock_path, aside)
+    except OSError as exc:
+        raise CorpusLockError(
+            f"{lock_path} is not a lock file CDA can read (a directory, a dangling link, "
+            f"or a file without read permission) and could not be moved aside "
+            f"({type(exc).__name__}: {exc}). Remove it by hand and retry; leave "
+            ".ingest.guard in place."
+        ) from exc
+    try:
+        if aside.is_dir() and not aside.is_symlink():
+            os.rmdir(aside)
+        else:
+            os.unlink(aside)
+    except OSError:
+        return f"moved it aside to {aside.name}; remove that entry by hand"
+    return "removed it"
+
+
 def _reclaim_stale_lock(lock_path: Path, expected: str) -> bool:
     """Remove a lock file whose holder is gone; returns whether this caller removed it.
 
@@ -322,33 +370,97 @@ def _wait_for_corpus_lock(lock_path, deadline, progress, announced):
     return True
 
 
+# The guard lock is busy (another holder) for these; any other error is a
+# filesystem that cannot take the lock at all (see ``_GUARD_UNSUPPORTED``).
+_GUARD_BUSY = (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK)
+# flock/msvcrt.locking refused by the filesystem itself (some NFS, SMB, FUSE
+# and container mounts): not a holder, so the OS guard is given up for this
+# acquisition and the PID-file protocol below serializes callers on its own.
+_GUARD_UNSUPPORTED = frozenset(
+    {errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL, errno.ENOSYS}
+)
+# Guard paths whose unsupported OS lock has been announced in this process.
+_guard_fallback_noted: set[str] = set()
+
+
+def _open_guard(guard_path: Path) -> int:
+    """Open (creating if needed) the guard file for locking, readable by every user.
+
+    POSIX ``flock`` works on a read-only descriptor, so the guard is opened
+    read-only there and created world-readable (the umask applies); a
+    group-shared corpus, or a container whose uid differs from the host's,
+    can then lock it too. ``msvcrt.locking`` needs a writable handle. A
+    guard this user may not open is reported with the fix instead of a
+    bare ``PermissionError``.
+    """
+    flags = os.O_CREAT | (os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+    try:
+        return os.open(guard_path, flags, 0o666)
+    except PermissionError as exc:
+        try:
+            status = os.stat(guard_path)
+            owner = f"owned by uid {status.st_uid}, mode {status.st_mode & 0o777:04o}"
+        except OSError:
+            owner = "its owner and mode could not be read"
+        access = "read and write access" if os.name == "nt" else "read access"
+        raise CorpusLockError(
+            f"Cannot open the corpus lock guard {guard_path} ({owner}): "
+            f"{exc.strerror or exc}. Every user who runs CDA on this corpus needs "
+            f"{access} to this permanent coordination file. Ask its owner to run "
+            f"`chmod a+r {guard_path}` (or `chmod 666` for a shared corpus) and retry."
+        ) from exc
+
+
+def _lock_guard(fd: int) -> None:
+    """Take the OS lock on the guard descriptor without waiting; raises ``OSError``."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @contextmanager
 def _corpus_guard(lock_path, deadline, progress):
     """Hold an OS lock on a persistent inode, including during stale PID-file recovery.
 
     Closing the descriptor releases the guard even after a process crash.
     Its file must never be unlinked: all waiters must lock the same inode.
+    Yields whether the OS lock is held: on a filesystem that refuses such
+    locks the guard is skipped (announced once per process) and only the
+    PID-file protocol of ``corpus_lock`` serializes callers, as before the
+    guard existed; stale-record recovery then has no OS lock around it.
     """
-    fd = os.open(lock_path.with_name(".ingest.guard"), os.O_CREAT | os.O_RDWR, 0o600)
+    guard_path = lock_path.with_name(".ingest.guard")
+    fd = _open_guard(guard_path)
     try:
         announced = False
+        guarded = True
         while True:
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _lock_guard(fd)
                 break
             except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK):
+                if exc.errno in _GUARD_UNSUPPORTED:
+                    guarded = False
+                    if str(guard_path) not in _guard_fallback_noted:
+                        _guard_fallback_noted.add(str(guard_path))
+                        progress(
+                            f"[corpus] the filesystem holding {guard_path} does not support "
+                            f"OS file locks ({errno.errorcode.get(exc.errno, exc.errno)}: "
+                            f"{exc.strerror or exc}); corpus operations are serialized by "
+                            f"the {lock_path.name} PID file alone, so a crashed run's lock "
+                            "is recovered without an OS lock around the recovery"
+                        )
+                    break
+                if exc.errno not in _GUARD_BUSY:
                     raise
                 announced = _wait_for_corpus_lock(lock_path, deadline, progress, announced)
-        yield
+        yield guarded
     finally:
         os.close(fd)
 
@@ -365,13 +477,16 @@ def corpus_lock(config: Config, progress: Callable[[str], None]):
     holder's pid: a lock whose process no longer exists (a crashed or killed
     run) is removed and acquisition retried at once, so it never stalls the
     next run; a lock held by a live process is waited on until the timeout,
-    which raises ``CorpusLockError``.
+    which raises ``CorpusLockError``. A persistent OS lock on ``.ingest.guard``
+    (see ``_corpus_guard``) covers that recovery; while it is held, a record
+    of this very pid, or an entry that is not a readable file at all, is
+    known to be stale as well.
     """
     store_dir = _store_directory(config)
     store_dir.mkdir(parents=True, exist_ok=True)
     lock_path = store_dir / ".ingest.lock"
     deadline = time.monotonic() + _INGEST_LOCK_TIMEOUT_SECONDS
-    with _corpus_guard(lock_path, deadline, progress):
+    with _corpus_guard(lock_path, deadline, progress) as guarded:
         announced = False
         while True:
             try:
@@ -379,12 +494,34 @@ def corpus_lock(config: Config, progress: Callable[[str], None]):
                 break
             except FileExistsError:
                 pid, content, stale = _lock_holder(lock_path)
+                if guarded and not stale and pid == os.getpid():
+                    # Every holder in this process holds the guard, which this
+                    # thread now holds alone, so no thread here owns this record:
+                    # it is this PID reused after a crash (a container's PID 1,
+                    # or a recycled pid), never a live holder. A record of another
+                    # live PID is waited on: with the guard held it is not a
+                    # current-protocol holder, but it may be a legacy holder (a
+                    # version without the guard, or one that fell back to the PID
+                    # file on a filesystem without OS locks), which the PID file
+                    # alone cannot tell from a stale record.
+                    stale = True
+                if guarded and not stale and pid is None and not content:
+                    age = _unreadable_lock_age(lock_path)
+                    if age is not None and age > _INGEST_LOCK_POLL_SECONDS:
+                        progress(
+                            f"[corpus] {lock_path} is not a lock file CDA can read (a "
+                            f"directory, a dangling link, or a file without read "
+                            f"permission); {_discard_unreadable_lock(lock_path)}; continuing"
+                        )
+                        continue
                 if stale:
                     if _reclaim_stale_lock(lock_path, content):
                         progress(
                             "[corpus] removed a stale lock file left by "
                             + (
-                                f"process {pid}, which is no longer running"
+                                f"an earlier run that had this process id ({pid})"
+                                if pid == os.getpid()
+                                else f"process {pid}, which is no longer running"
                                 if pid
                                 else "a crashed run"
                             )
@@ -971,33 +1108,64 @@ def _handle_missing(
     exclude: list[str] | None = None,
     recursive: bool = True,
     unchecked: set[str] | None = None,
+    stored_sources: dict[str, dict] | None = None,
+    file_digests: dict[str, str] | None = None,
 ) -> None:
+    """Report, and with ``prune_missing`` remove, stored sources the library no longer backs.
+
+    ``stored_sources`` is the ingest loop's view of the store after this run
+    and ``file_digests`` the digests it computed ({NFC relpath: sha256} of
+    every selected file it could read), so no file is hashed again here. A
+    source stored under a symlink route (an older store's identity) is a
+    missing source when its canonical file is gone; a duplicate, or an older
+    version, when a complete source holds the canonical file's current bytes;
+    and retained, as the document's only stored version, when the canonical
+    file exists but could not be stored this run (unreadable, no text, or a
+    failed refresh). Retention does not depend on ``prune_missing``.
+    """
     unchecked = set() if unchecked is None else unchecked
+    stored_sources = _stored_pdf_sources(collection) if stored_sources is None else stored_sources
+    file_digests = {} if file_digests is None else file_digests
     missing, root_unknown = _missing_sources(
         collection, pdf_dir, pdf_root, exclude=exclude, recursive=recursive, unchecked=unchecked
     )
     excluded = _excluded_sources(collection, pdf_dir, pdf_root, exclude, recursive)
-    aliased = _alias_sources(collection, pdf_dir, pdf_root, exclude, recursive)
-    retained = []
-    removable = []
-    for relpath in aliased:
+    retained, duplicates, older = [], [], []
+    for relpath in _alias_sources(collection, pdf_dir, pdf_root, exclude, recursive):
         canonical = _canonical_relpath(pdf_dir, relpath)
         try:
-            digest = file_digest(pdf_dir / canonical)
+            exists = _exists_exactly(pdf_dir, canonical)
         except OSError:
-            retained.append(relpath)
+            unchecked.add(relpath)
             continue
-        state, _ = _ingest_state(collection, canonical, {"source_file_sha256": digest})
-        (removable if state == "complete" else retained).append(relpath)
-    aliased = removable
+        if not exists:
+            missing.append(relpath)
+            continue
+        digest = file_digests.get(canonical)
+        stored_elsewhere = digest is not None and any(
+            name != relpath
+            and info["source_file_sha256"] == digest
+            and _ingest_state(collection, name, {"source_file_sha256": digest})[0] == "complete"
+            for name, info in stored_sources.items()
+        )
+        if not stored_elsewhere:
+            retained.append(relpath)
+        elif (stored_sources.get(relpath) or {}).get("source_file_sha256") == digest:
+            duplicates.append(relpath)
+        else:
+            older.append(relpath)
+    missing.sort()
     if retained:
         stats["pdfs_kept_previous"] += len(retained)
         progress(
-            "[warn] canonical replacement could not be stored; previous versions retained "
-            "under their symlink routes (not pruned):\n"
+            "[warn] canonical replacement could not be stored (the file exists but could "
+            "not be read, has no text, or failed to refresh); the previous versions stored "
+            "under their symlink routes are retained as the only stored version of each "
+            "document, whether or not --prune-missing is given:\n"
             + "\n".join(f"    {relpath}" for relpath in retained)
         )
-    stats["pdfs_missing"] = len(missing) + len(aliased)
+    stats["pdfs_missing"] = len(missing)
+    stats["pdfs_aliased"] = len(duplicates) + len(older)
     stats["pdfs_stored_excluded"] = len(excluded)
     stats["pdfs_root_unknown"] = len(root_unknown)
     stats["pdfs_unchecked"] = len(unchecked)
@@ -1016,7 +1184,17 @@ def _handle_missing(
         )
     for relpaths, what in (
         (missing, "no longer on disk"),
-        (aliased, "stored under a symlink route; the file's own path is its identity now"),
+        (
+            duplicates,
+            "stored under a symlink route to a file stored under its own path (the file's "
+            "own path is its identity now; the document is stored twice)",
+        ),
+        (
+            older,
+            "stored under a symlink route as an older version of a file re-ingested under "
+            "its own path (both versions of the document are counted until the route is "
+            "pruned)",
+        ),
         (excluded, "now excluded by --exclude or --no-recursive"),
     ):
         if not relpaths:
@@ -1082,6 +1260,7 @@ def ingest_pdf_dir(
         "pdfs_no_text": 0,
         "pdfs_unreadable": 0,
         "pdfs_missing": 0,
+        "pdfs_aliased": 0,
         "pdfs_pruned": 0,
         "pdfs_stored_excluded": 0,
         "metadata_updated": 0,
@@ -1128,6 +1307,7 @@ def ingest_pdf_dir(
     }
     unreadable: list[str] = []
     unchecked: set[str] = set()  # stored relpaths whose folder could not be listed
+    file_digests: dict[str, str] = {}  # NFC relpath -> sha256 of every file read this run
     with corpus_lock(config, progress):
         collection = get_collection(config, create=True)
         chunk_size, chunk_overlap = _chunk_settings(config)
@@ -1161,6 +1341,7 @@ def ingest_pdf_dir(
                     + _failed_refresh_note(state)
                 )
                 continue
+            file_digests[rel_name] = source_sha256
             current = {
                 "source_file_sha256": source_sha256,
                 "chunk_size_words": chunk_size,
@@ -1334,6 +1515,8 @@ def ingest_pdf_dir(
             exclude=exclude,
             recursive=recursive,
             unchecked=unchecked,
+            stored_sources=stored_sources,
+            file_digests=file_digests,
         )
 
     progress(
@@ -1345,6 +1528,7 @@ def ingest_pdf_dir(
         f"{stats['pdfs_no_text']} with no extractable text, "
         f"{stats['pdfs_unreadable']} unreadable ({stats['pdfs_kept_previous']} failed files kept "
         f"their previous version), {stats['pdfs_missing']} missing from disk, "
+        f"{stats['pdfs_aliased']} stored under a symlink route, "
         f"{stats['pdfs_stored_excluded']} stored but now excluded "
         f"({stats['pdfs_pruned']} removed); {stats['chunks_added']} chunks added"
     )
