@@ -1,0 +1,16 @@
+CC0 1.0 Universal
+
+The contents of this directory (demo/toy_corpus/) are dedicated to the
+public domain under the Creative Commons CC0 1.0 Universal dedication:
+
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+Details:
+
+- abstracts.jsonl is derived from the OpenAlex dataset, which OpenAlex
+  distributes under CC0 (https://docs.openalex.org/additional-help/faq).
+- The synthetic researcher drafts in drafts/ were written for this demo by
+  the repository authors, who dedicate them to the public domain under CC0.
+
+To the extent possible under law, the authors have waived all copyright and
+related or neighboring rights to these files.

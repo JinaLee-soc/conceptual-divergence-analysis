@@ -1,0 +1,80 @@
+# Secrets — never commit
+.env
+*.env
+!.env.example
+
+# User data — never commit (ground rule: no real corpus data in this repo).
+# Patterns are ROOT-ANCHORED (leading slash) on purpose: unanchored
+# `corpus/` would also ignore src/cda/corpus/ and `drafts/` would ignore
+# demo/toy_corpus/drafts/ — which silently broke fresh clones once.
+# The directories themselves ship (via .gitkeep) so `docker compose up` on
+# Linux binds existing user-owned dirs instead of having the daemon create
+# them root-owned, which failed the first Ingest (or a paid Analyze) with a
+# raw PermissionError. That removes the root-owned case only: the container
+# still writes as uid 1000 by default, so a Linux account with a different
+# uid needs the CDA_UID/CDA_GID override documented in docker-compose.yml.
+/corpus/*
+!/corpus/.gitkeep
+/drafts/*
+!/drafts/.gitkeep
+/outputs/*
+!/outputs/.gitkeep
+*.chroma
+chroma.sqlite3
+zotero_export*.csv
+
+# Manuscript drafts (.docx/.pdf) at the repository root must never be
+# committed; the patterns are root-anchored so docs/ and demo/ are unaffected.
+/*.docx
+/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Model caches (downloaded at runtime, never committed)
+.cache/
+models--*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Demo runtime artifacts (committed demo inputs live in demo/toy_corpus,
+# demo/fixtures, demo/expected_reports; everything generated at run time goes
+# to demo/_runtime which is disposable)
+demo/_runtime/
+
+# Reference-manager exports (personal bibliographic data, never committed)
+/Paperpile*.csv
+/*References*.csv
+
+# Local agent instructions, session notes, and editor/plugin state
+.fablize/
+/.codex/
+/.claude/
+/.agents/
+/AGENTS.md
+/CLAUDE.md
+/CONTEXT.md
+/MEMORY.md
+/PLAN.md
+/TODO.md
+/TASKS.md
+/HANDOFF.md
+/WORK_LOG.md
+/SESSION_NOTES.md

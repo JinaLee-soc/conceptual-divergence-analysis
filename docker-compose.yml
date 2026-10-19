@@ -1,0 +1,45 @@
+# One-command path: docker compose up → open http://localhost:8501 → click
+# "Try the demo". Your corpus, drafts, and reports live on the host in the
+# three mounted directories; the persistent ChromaDB store is created inside
+# ./corpus/chroma, so it survives container rebuilds.
+#
+# The container sees ONLY those three mounted directories. A host path typed
+# into the GUI's Ingest tab (say, /home/me/papers) does not exist inside the
+# container, so it fails with "PDF directory not found" even though the folder
+# is right there on the host. Put the PDFs under ./corpus (or add the folder
+# as another line under `volumes:` below) and ingest from that path instead.
+#
+# Linux bind-mount ownership. The three directories ship with the repository
+# (.gitkeep), so they already exist owned by whoever cloned it instead of
+# being created root-owned by the daemon at first `up`. That is only half the
+# problem: the container writes them as the uid set below (1000 by default),
+# so writes succeed only when the cloning user's uid is also 1000 — the usual
+# first account on a personal Linux box, but not on a shared or corporate
+# machine. If the first Ingest fails with a permission error, run:
+#
+#     CDA_UID=$(id -u) CDA_GID=$(id -g) docker compose up
+#
+# (macOS and Windows Docker Desktop translate ownership for you; the override
+# is harmless there too.)
+services:
+  cda:
+    build: .
+    user: "${CDA_UID:-1000}:${CDA_GID:-1000}"
+    ports:
+      # Published on localhost only — the same reasoning as the macOS
+      # launcher's 127.0.0.1 bind: anyone who can reach this port can run
+      # live analyses on your ANTHROPIC_API_KEY and read the mounted corpus,
+      # drafts, and reports. (The 0.0.0.0 inside the Dockerfile is container-
+      # internal; this line is what controls exposure.) To share the GUI on a
+      # network you trust, change it to "8501:8501" — deliberately.
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./corpus:/app/corpus
+      - ./drafts:/app/drafts
+      - ./outputs:/app/outputs
+    environment:
+      # Passed through from your shell or a local .env file (never baked into
+      # the image). Leave unset to use the GUI in mock/demo mode only.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENALEX_MAILTO=${OPENALEX_MAILTO:-}
+      - CDA_VERIFICATION_MODEL=${CDA_VERIFICATION_MODEL:-}

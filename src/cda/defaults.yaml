@@ -1,0 +1,128 @@
+# CDA default parameters.
+#
+# These are the values reported in the accompanying paper; user configs
+# override them (see config.example.yaml for a fully-commented copy).
+# An identical copy of this file is packaged inside the `cda` package
+# (src/cda/defaults.yaml) so the CLI works from any directory; a test
+# enforces that the two files never drift apart.
+
+paths:
+  corpus_dir: ./corpus # ChromaDB store is created at <corpus_dir>/chroma
+  drafts_dir: ./drafts
+  output_dir: ./outputs
+  prompt_file: null # null = use the packaged prompts/register_assignment_v5.md
+
+corpus:
+  collection: cda_corpus
+  chunk_size_words: 500
+  chunk_overlap_words: 100
+  recursive: true # search sub-folders of --pdf-dir; false = that folder only
+  exclude: [] # glob patterns to skip, matched against the path relative to --pdf-dir
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  revision: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"  # pragma: allowlist secret — Hugging Face commit of the model snapshot
+
+retrieval:
+  keyword_max_chunks: 0 # 0 = all matching chunks
+  window_mode: sentence # sentence | context
+  min_window_chars: 0 # no context expansion
+  max_window_chars: 0 # retain complete sentences
+
+mywork:
+  priority: [filename_patterns, metadata_flags, zotero_tags, profile_titles]
+  filename_patterns: []
+  publication_titles: []
+  title_match_min_overlap: 3
+  title_match_min_ratio: 0.55
+
+
+clustering:
+  mode: joint # joint | independent (independent = legacy optional mode)
+  method: kmeans # kmeans (the paper's method) | hierarchical (one average-linkage tree, cut at the chosen resolution)
+  k: auto # auto (silhouette-selected, the paper's method) | an integer >= 2 pins the resolution
+  seed: 42
+  kmeans_restarts: 5
+  kmeans_max_iter: 80
+  researcher_max_k: 8 # independent mode only
+  literature_max_k: 15 # independent mode only
+  joint_max_k: 15 # joint mode: k sweep over the pooled passages
+  min_cluster_size: 3
+  silhouette_subsample: 2000
+  representatives_per_cluster: 5
+  stability_check:
+    # LLM-free: re-clusters the identical, already-selected passage set under
+    # 30 independently shuffled orderings and reports how much k varies,
+    # folded into every report's "Clustering Stability" section.
+    enabled: true
+    trials: 31 # total, including the canonical run; <2 disables the check
+    seed_base: 0
+
+timeframe:
+  # Fix the corpus to a window of Zotero "Date Added" (acquisition time, never
+  # publication year). Both bounds null = the whole corpus, as before.
+  added_from: null # e.g. "2019-01-01" (quoted)
+  added_to: null # e.g. "2026-05-01" — analyze the library as it stood that day
+  include_undated: false # passages with no "Date Added" cannot be placed in time
+  date_source: zotero # zotero (Zotero "Date Added") | filesystem (file arrival on disk)
+
+saturation:
+  enabled: true
+  # scope: what the subsampling applies to.
+  #   prompt (default) —
+  #     cluster the FULL retrieved pool; no subsampling is applied. The prompt
+  #     stays bounded because it carries cluster summaries, not passages.
+  #   sample — optional subsampling: cluster the saturation-selected subsample.
+  #     Not the default.
+  scope: prompt
+  start: 50
+  step: 25
+  max_passages: 1200
+  ari_threshold: 0.8
+  consecutive_increments: 2
+  ranking: term # term | similarity
+
+figure:
+  # Passage map: the joint partition drawn in the pooled embedding space
+  # (PCA to 2D), written as a PNG beside the report. LLM-free and
+  # deterministic; it reads the clustering stage's own output and never
+  # changes the analysis. Needs matplotlib.
+  enabled: true
+  dpi: 300
+
+emergence:
+  # EXPERIMENTAL (post-paper): cluster emergence over library-acquisition time.
+  start: 20
+  step: 10
+  match_threshold: 0.80
+
+validation:
+  # EXPERIMENTAL (post-paper): researcher-led validation of the clustering.
+  readers: [] # empty = the pinned llm.model, plus llm.verification_model when set
+  passages_shown_per_cluster: 8
+
+flags:
+  researcher_share_threshold: 0.80
+  literature_share_threshold: 0.10
+  underrepresented_max_researcher_passages: 0
+
+llm:
+  model: claude-sonnet-4-6
+  max_tokens: 6000
+  temperature: 0.0
+  verification_model: null
+
+analysis:
+  min_researcher_passages: 1
+
+distance_scale:
+  1: terminological variants
+  2: overlapping usage
+  3: adjacent usage
+  4: distinct registers
+  5: incommensurable
+
+themes: []
+
+diagnose:
+  declared_fields: []

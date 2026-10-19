@@ -1,0 +1,5 @@
+{
+  "response": "{\"gloss\": \"Illustrative reading of researcher cluster 0.\", \"judgment\": \"coherent\", \"rationale\": \"One consistent use of the term across the passages.\"}",
+  "synthetic": true,
+  "_note": "Hand-written illustrative reading, NOT a recorded model response. Do not cite agreement numbers computed against it. See demo/fixtures/validation/README.md."
+}

@@ -1,0 +1,121 @@
+/* Interface chrome only: chart palettes and exported figures remain untouched. */
+[data-testid="stApp"], [data-testid="stHeader"] {
+  background: #fff;
+  color: #111;
+}
+[data-testid="stMainBlockContainer"] {
+  max-width: 1200px;
+  padding-top: 3rem;
+  padding-bottom: 5rem;
+}
+[data-testid="stSidebar"] {
+  background: #fff;
+  border-right: 1px solid #d4d4d4;
+}
+[data-testid="stSidebar"] h1 {
+  font-family: sans-serif;
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: .1em;
+}
+[data-testid="stMain"] h1 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  font-weight: 500;
+  line-height: 1.08;
+  letter-spacing: -.035em;
+  color: #111;
+}
+[data-testid="stMain"] h2 {
+  font-size: 1.2rem;
+  font-weight: 650;
+  color: #111;
+}
+[data-testid="stMain"] h3 { font-size: 1.05rem; color: #111; }
+[data-testid="stCaptionContainer"] { color: #666; }
+[data-testid="stMarkdownContainer"] a { color: #111; text-underline-offset: 3px; }
+[data-testid="stButton"] button,
+[data-testid="stDownloadButton"] button,
+[data-testid="stFormSubmitButton"] button {
+  border: 1px solid #111;
+  border-radius: 2px;
+  box-shadow: none;
+  min-height: 42px;
+  background: #fff;
+  color: #111;
+}
+button[data-testid="stBaseButton-primary"] {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+[data-testid="stButton"] button:hover,
+[data-testid="stDownloadButton"] button:hover {
+  border-color: #111;
+  background: #ededed;
+  color: #111;
+}
+button[data-testid="stBaseButton-primary"]:hover { background: #333; color: #fff; }
+[data-testid="stButton"] button:focus-visible,
+[data-testid="stDownloadButton"] button:focus-visible {
+  outline: 2px solid #111;
+  outline-offset: 3px;
+  box-shadow: none;
+}
+[data-testid="stButton"] button:disabled { opacity: .4; }
+[data-baseweb="tab-list"] { gap: 1.75rem; border-bottom: 1px solid #ccc; }
+[data-baseweb="tab"] { color: #666; background: #fff; }
+[data-baseweb="tab"][aria-selected="true"] { color: #111; font-weight: 700; }
+[data-baseweb="tab-highlight"] { background: #111; }
+[data-baseweb="input"], [data-baseweb="textarea"],
+[data-baseweb="select"] > div {
+  border-color: #bbb;
+  border-radius: 2px;
+  background: #fff;
+  color: #111;
+}
+[data-testid="stExpander"] { border-color: #ccc; border-radius: 2px; }
+[data-testid="stAlert"] {
+  background: #f7f7f7;
+  color: #111;
+  border: 1px solid #ddd;
+  border-left: 3px solid #111;
+  border-radius: 2px;
+}
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] { color: #111; }
+/* Severity uses icons and border shades within the monochrome interface. */
+[data-testid="stAlert"]:has([data-testid="stAlertContentError"]) { border-left: 4px solid #111; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) { border-left: 4px solid #555; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]) { border-left: 4px solid #111; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) { border-left: 4px solid #333; }
+[data-testid="stAlertContentError"] [data-testid="stAlertDynamicIcon"] { color: #111; }
+[data-testid="stAlertContentWarning"] [data-testid="stAlertDynamicIcon"] { color: #555; }
+[data-testid="stAlertContentInfo"] [data-testid="stAlertDynamicIcon"] { color: #111; }
+[data-testid="stAlertContentSuccess"] [data-testid="stAlertDynamicIcon"] { color: #333; }
+[data-testid="stStatusWidget"] { border-radius: 2px; border-color: #ccc; }
+[data-testid="stMetric"] {
+  border-top: 1px solid #111;
+  padding-top: .8rem;
+}
+[data-testid="stMetricValue"] { font-family: Georgia, "Times New Roman", serif; }
+[data-testid="stCode"], [data-testid="stMarkdownPre"] {
+  background: #f5f5f5;
+  border-radius: 2px;
+  color: #333;
+}
+[data-testid="stCode"] span { color: #333 !important; }
+[data-testid="stMarkdownContainer"] code { color: #333; background: #f5f5f5; }
+hr { border-color: #ccc; }
+@media (max-width: 720px) {
+  [data-testid="stMainBlockContainer"] { padding: 2rem 1.25rem 3rem; }
+  [data-baseweb="tab-list"] { gap: 1rem; }
+}
+[data-testid="stAlertContainer"],
+[data-testid^="stAlertContent"] {
+  background: #f7f7f7 !important;
+  color: #111 !important;
+}
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p { color: #666 !important; }
+[data-testid="stCaptionContainer"] code,
+[data-testid="stMarkdownContainer"] code { color: #333 !important; }

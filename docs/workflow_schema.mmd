@@ -1,0 +1,51 @@
+%% CDA workflow schema — the three-stage pipeline of the paper (§3.2–3.3).
+%% This file is the source for the workflow figure; render with:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/workflow_schema.mmd -o docs/workflow_schema.svg
+flowchart TD
+    subgraph S1["Stage 1 — Passage extraction"]
+        direction TB
+        TERM(["Target term"])
+        KW["Keyword query<br/>(literal matches)"]
+        SEM["Semantic nearest-neighbor query<br/>(non-literal discussion)"]
+        MERGE["Merge + deduplicate"]
+        SENT["Extract term-sentences<br/>(unit of analysis)"]
+        MYWORK{"MyWork resolution<br/>filename patterns · metadata flags ·<br/>Zotero tags · profile titles<br/>(reason logged per passage)"}
+        DRAFTS["Researcher drafts<br/>.docx · .md · .txt · .pdf<br/>exact extraction + semantic fallback"]
+        CORPUS[("Researcher-curated corpus<br/>local vector store")]
+        TERM --> KW & SEM
+        CORPUS --> KW & SEM
+        KW --> MERGE
+        SEM --> MERGE
+        MERGE --> SENT --> MYWORK
+        DRAFTS -->|"always researcher<br/>(direct draft inclusion)"| RES
+        MYWORK -->|researcher| RES["Researcher passages"]
+        MYWORK -->|literature| LIT["Literature passages"]
+    end
+
+    subgraph S2["Stage 2 — Divergence mapping"]
+        direction TB
+        SAT{"Saturation-based subsampling<br/>rank by cosine similarity to the term's<br/>embedding (external anchor); add increments<br/>until ARI ≥ 0.8 twice in a row; cap 1,200;<br/>flag when not reached"}
+        KMJ["Spherical k-means over BOTH corpora pooled<br/>L2-normalized · cosine · restarts ·<br/>k by silhouette maximization<br/><i>default (clustering.mode: joint)</i>"]
+        COMP["Shared-cluster composition<br/>researcher / literature counts per cluster<br/>→ where the researcher's passages sit"]
+        KMI["<i>--independent</i>: the same procedure run<br/>separately per corpus (the paper's pipeline);<br/>researcher passages located by cross-assignment"]
+        SUMM["Cluster summaries<br/>cluster size + five representative passages<br/>selected by centroid proximity<br/>(joint mode: two views, shared cluster ids)"]
+        LIT --> SAT
+        RES --> KMJ
+        SAT --> KMJ
+        KMJ --> COMP --> SUMM
+        RES -.-> KMI
+        SAT -.-> KMI
+        KMI -.-> SUMM
+    end
+
+    subgraph S3["Stage 3 — Register assignment + divergence analysis"]
+        direction TB
+        LLM["LLM register assignment<br/>(claude-sonnet-4-6)<br/>registers · operative definitions ·<br/>five-point semantic distance"]
+        AUDIT["Cluster–register audit<br/>match / split / merge rate<br/>(both corpora)"]
+        FLAGS["Divergence flags<br/>researcher-concentrated clusters<br/>(&gt;80% of a cluster holding &lt;10% of literature)<br/>+ registers underrepresented in researcher usage<br/>joint: direct membership · independent: cross-assignment"]
+        REPORT[["Timestamped markdown report<br/>structured directory → longitudinal comparison"]]
+        SUMM --> LLM --> AUDIT --> REPORT
+        LLM --> FLAGS --> REPORT
+    end
+
+    S1 --> S2 --> S3

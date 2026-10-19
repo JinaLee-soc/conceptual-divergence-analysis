@@ -1,0 +1,77 @@
+name: record-fixtures
+
+# Optional live demo recording on Linux. Requires the ANTHROPIC_API_KEY
+# repository secret and costs approximately $0.10–0.15 per term. The workflow
+# uploads the resulting fixtures and commits changes to the selected branch.
+# Regular CI replays the committed authored fixtures for both demo terms.
+
+on:
+  workflow_dispatch:
+    inputs:
+      term:
+        description: "Demo term to (re)record on Linux"
+        required: true
+        default: "consensus"
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    permissions:
+      # The last step commits the recorded fixture back to the branch.
+      contents: write
+    env:
+      # Untrusted input reaches scripts only as a quoted variable, never as
+      # expression text spliced into the script.
+      TERM_INPUT: ${{ inputs.term }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate the term input
+        run: |
+          case "$TERM_INPUT" in
+            *[!a-z]*|"") echo "::error::term must be lowercase letters only"; exit 1 ;;
+          esac
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Record the fixture on Linux (one live LLM call)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set. Add it under" \
+                 "Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+          cda demo --term "$TERM_INPUT" --record-fixtures
+
+      - name: Prove the recorded fixture replays offline (no key, no network)
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: cda demo --term "$TERM_INPUT" --mock-llm
+
+      - name: Upload the fixture as a build artifact (manual-commit fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixtures-${{ inputs.term }}-linux
+          path: demo/fixtures/*.json
+
+      - name: Commit the new fixture to the branch you ran from
+        run: |
+          if git diff --quiet -- demo/fixtures; then
+            echo "No fixture change: this platform's fingerprint already ships."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add demo/fixtures
+          git commit -m "demo: record $TERM_INPUT fixture on linux/x64 for cross-platform offline replay"
+          git push

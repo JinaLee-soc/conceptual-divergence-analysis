@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#111111"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f5f5"
+textColor = "#111111"
+font = "sans serif"
+
+[browser]
+# The public-demo footer states that usage statistics are off; keep this so the
+# statement holds without the Docker/launcher flag.
+gatherUsageStats = false

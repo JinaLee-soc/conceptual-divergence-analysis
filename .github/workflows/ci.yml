@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev tooling
+        run: pip install -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Secret scan
+        run: |
+          detect-secrets scan --exclude-files '\.venv/.*' > /tmp/scan.json
+          python -c "
+          import json
+          results = json.load(open('/tmp/scan.json'))['results']
+          findings = {f: v for f, v in results.items()}
+          assert not findings, f'detect-secrets found potential secrets: {list(findings)}'
+          print('secret scan clean')
+          "
+
+  test-offline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is where the dependency pins were resolved and tested.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        # gui extra included: without streamlit/altair the offline GUI tests
+        # (including the network-scope-footer guard) silently skip.
+        run: pip install -e ".[dev,gui]"
+      - name: Offline test suite (no API key, no model download)
+        run: pytest
+        env:
+          # Belt and braces: the default suite must not need these.
+          ANTHROPIC_API_KEY: ""
+          HF_HUB_OFFLINE: "1"
+
+  demo-mock:
+    # End-to-end demo on the committed toy corpus in --mock-llm mode, for
+    # both demo terms. Needs the real embedding model (~90 MB), cached
+    # between runs. If a replay misses its fixture, the assembled prompt is
+    # uploaded so a fixture for this platform can be added.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache the HF embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-minilm-l6-v2
+      - name: Install package
+        run: pip install -e .
+      - name: Run the novelty demo in mock mode
+        run: cda demo --term novelty --mock-llm
+      - name: Run the consensus demo in mock mode
+        run: cda demo --term consensus --mock-llm
+      - name: Assemble the prompts that missed their fixtures
+        if: failure()
+        run: |
+          cda demo --term novelty --mock-llm --dry-run
+          cda demo --term consensus --mock-llm --dry-run
+      - name: Upload the assembled prompts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-prompts-linux-x64
+          path: |
+            demo/_runtime/outputs/*_system.md
+            demo/_runtime/outputs/*_prompt.md
+
+  docker-smoke:
+    # Build the image and prove the container works end-to-end in mock mode:
+    # the acceptance path is `docker compose up` → GUI → demo button.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t cda-smoke .
+      - name: Demo inside the container (mock mode, no network needed)
+        run: |
+          docker run --rm cda-smoke cda demo --term novelty --mock-llm
+          docker run --rm cda-smoke cda demo --term consensus --mock-llm
+      - name: GUI serves its health endpoint
+        run: |
+          docker run -d --name cda-gui -p 127.0.0.1:8501:8501 cda-smoke
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8501/_stcore/health; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs cda-gui
+          docker rm -f cda-gui
+          test "$ok" = "1"
