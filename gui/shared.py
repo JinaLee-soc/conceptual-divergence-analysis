@@ -145,13 +145,14 @@ def render_report_file(path: Path, key_prefix: str = "reports_tab") -> None:
     )
 
 
-def run_with_live_log(fn, **kwargs):
+def run_with_live_log(fn, *, status_label="Running…", failure_message=None, **kwargs):
     """Run a pipeline function, streaming its progress lines into the page.
 
     The session-entered API key (if any) is exposed to the provider layer
-    only for the duration of this call.
+    only for the duration of this call. ``failure_message(exc)`` renders the
+    error shown on failure; by default it is the exception's text.
     """
-    log_box = st.status("Running…", expanded=True)
+    log_box = st.status(status_label, expanded=True)
     lines: list[str] = []
 
     def progress(message: str) -> None:
@@ -165,5 +166,5 @@ def run_with_live_log(fn, **kwargs):
         return result
     except Exception as exc:
         log_box.update(label="Failed", state="error")
-        st.error(str(exc))
+        st.error(failure_message(exc) if failure_message else str(exc))
         return None

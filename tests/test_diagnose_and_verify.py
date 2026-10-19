@@ -616,11 +616,15 @@ def test_verify_falls_back_to_the_configured_system_prompt_with_a_note(tmp_path,
 
 
 def test_verify_reports_an_undecodable_run_file_instead_of_a_codec_error(tmp_path):
+    """Damage in the chosen run's prompt body is reported with the recovery
+    advice (the finder reads only the head, so the body is first read here)."""
     from cda.llm.base import LLMError
+    from cda.registers import verify
     from cda.registers.verify import run_verify
 
     _write_run(tmp_path, "novelty", "20260801_090000")
-    (tmp_path / "drift_novelty_20260801_090000_prompt.md").write_bytes(b"prompt caf\xc3")
+    body = b'TARGET TERM: "novelty"\n\n' + b"x" * verify._PROMPT_HEAD_BYTES + b"caf\xc3"
+    (tmp_path / "drift_novelty_20260801_090000_prompt.md").write_bytes(body)
     with pytest.raises(LLMError, match="not readable as UTF-8"):
         run_verify(
             "novelty",
@@ -628,3 +632,22 @@ def test_verify_reports_an_undecodable_run_file_instead_of_a_codec_error(tmp_pat
             fixtures_dir=tmp_path / "fixtures",
             progress=lambda _msg: None,
         )
+
+
+def test_verify_names_a_run_whose_prompt_head_is_undecodable(tmp_path):
+    """A prompt unidentifiable from its head is skipped by the finder and
+    named in the no-run error, never surfaced as a bare codec error."""
+    from cda.registers.verify import run_verify
+
+    _write_run(tmp_path, "novelty", "20260801_090000")
+    (tmp_path / "drift_novelty_20260801_090000_prompt.md").write_bytes(b"prompt caf\xc3")
+    with pytest.raises(FileNotFoundError) as excinfo:
+        run_verify(
+            "novelty",
+            _verify_config(tmp_path),
+            fixtures_dir=tmp_path / "fixtures",
+            progress=lambda _msg: None,
+        )
+    message = str(excinfo.value)
+    assert "1 same-slug run(s) were skipped" in message
+    assert "drift_novelty_20260801_090000_prompt.md: not UTF-8" in message

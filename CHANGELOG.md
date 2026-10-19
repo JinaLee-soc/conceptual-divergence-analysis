@@ -5,6 +5,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Lock, exclusion and lookup repairs
+
+- `cda verify` no longer fails because an older run for the same term has a
+  damaged saved prompt. Only the first 4 KB of each same-slug prompt is read
+  to identify its term (a leading BOM is tolerated); unreadable prompts are
+  skipped, and the newest intact run is verified. When none remains, the
+  error lists the skipped runs with a diagnosis. Advice commands quote the
+  term (`--term 'C#'`).
+- The GUI's "Resume latest session for this term" skips session directories
+  whose `session.json` cannot be loaded, resumes the newest intact session
+  with a matching stored term, and shows an error instead of a traceback
+  when none remains.
+- `cda ingest --exclude` could be defeated by a symlink elsewhere in the
+  library, and `--prune-missing` then renamed the excluded source to the link
+  route. Each physical file is now judged once by its canonical route (its
+  real path under `--pdf-dir`, or the first route in sorted order for a folder
+  outside it) and stored under it; sources stored under a link route are
+  renamed to their real path. Every physical folder is walked once.
+- A `.ingest.lock` left by a crashed or killed run no longer stalls every
+  corpus operation for the full timeout: a lock whose holder process no longer
+  exists is removed and acquisition retried at once. A genuine timeout raises
+  `CorpusLockError`, which the CLI reports as an error without a traceback.
+- The demo creates the toy-corpus store under the corpus lock, so concurrent
+  first visitors cannot corrupt a fresh store.
+- `cda demo` and the GUI demo buttons stream progress and explain a lock
+  timeout (without host paths on the public demo).
+- `cda validate --session DIR --term X` compares terms the way result lookup
+  does, so `AI` resumes a session saved as `ai`; a mismatch names the stored
+  term.
+- With `retrieval.keyword_max_chunks` set, every source needing re-ingestion
+  is listed at once.
 ### Corpus access and result lookup
 
 - Analysis and corpus diagnosis wait for ingestion to finish and hold the same

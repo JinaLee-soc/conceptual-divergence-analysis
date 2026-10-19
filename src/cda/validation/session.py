@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -201,26 +202,58 @@ def find_latest_session(output_dir: Path, term: str) -> Path:
     then sorts by the parsed timestamp: a term whose slug extends another
     ("novelty_claims" vs "novelty") can never be picked up by mistake, and
     ordering never falls back to lexicographic filename comparison.
+
+    A same-slug directory whose session.json cannot be loaded (truncated,
+    non-UTF-8, another schema version, unreadable) is skipped, not fatal:
+    one damaged OLDER record must not block resuming the newest intact
+    session. When nothing intact remains, the error lists what was skipped,
+    so the researcher knows a verdict trail exists but cannot be read.
     """
     slug = safe_term_slug(term)
     root = Path(output_dir)
     candidates = []
+    skipped: list[tuple[str, str]] = []
     if root.is_dir():
-        for path in root.iterdir():
+        for path in sorted(root.iterdir()):
             match = _SESSION_DIR.match(path.name)
-            if match and match.group("slug") == slug and (path / "session.json").is_file():
+            if not match or match.group("slug") != slug or not (path / "session.json").is_file():
+                continue
+            try:
                 stored = load_session(path).get("term")
-                if not isinstance(stored, str) or term_identity(stored) != term_identity(term):
-                    continue
-                # Within one second, a higher collision suffix means a later
-                # session: create_session hands out -1, -2, … in order.
-                candidates.append((match.group("ts"), int(match.group("n") or 0), path))
+            except (ValueError, OSError) as exc:
+                skipped.append((path.name, _first_sentence(exc)))
+                continue
+            if not isinstance(stored, str) or term_identity(stored) != term_identity(term):
+                continue
+            # Within one second, a higher collision suffix means a later
+            # session: create_session hands out -1, -2, … in order.
+            candidates.append((match.group("ts"), int(match.group("n") or 0), path))
     if not candidates:
+        detail = ""
+        if skipped:
+            listed = "; ".join(f"{name}: {reason}" for name, reason in skipped)
+            detail = (
+                f" {len(skipped)} session director{'y' if len(skipped) == 1 else 'ies'} "
+                f"for this term could not be loaded and {'was' if len(skipped) == 1 else 'were'} "
+                f"skipped ({listed}); restore the record from a backup or version control "
+                "to resume it."
+            )
         raise FileNotFoundError(
-            f"No validation session found for '{term}' under {root}. "
-            "Start one with: cda validate --term " + term
+            f"No validation session found for '{term}' under {root}.{detail} "
+            "Start one with: cda validate --term " + shlex.quote(term)
         )
     return max(candidates, key=lambda entry: (entry[0], entry[1]))[2]
+
+
+def _first_sentence(exc: BaseException) -> str:
+    """The diagnosis of a load error, without its recovery advice.
+
+    ``load_session`` messages say what is wrong, then how to recover; in a
+    list of skipped directories only the diagnosis is wanted, once per
+    directory, and the advice is given once for all of them.
+    """
+    text = str(exc) or type(exc).__name__
+    return text.partition(". ")[0].rstrip(".")
 
 
 def current_revision(session: dict, side: str) -> int:

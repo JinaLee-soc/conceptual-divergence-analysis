@@ -67,6 +67,7 @@ def keyword_hits(
     phrase_pattern = re.compile(literal_pattern(term), re.IGNORECASE)
     sentence_pattern = term_regex(term)
     seen_ids: set[str] = set()
+    legacy: set[str] = set()  # sources without stored sentence boundaries, all reported at once
     offset = 0
     capped = False
     while True:
@@ -111,10 +112,15 @@ def keyword_hits(
                 if not phrase_pattern.search(context):
                     continue
             if max_chunks:
+                if _is_legacy_chunk(metadata):
+                    # Keep paging to name every affected source, as the
+                    # uncapped path does; nothing is analyzed in this case.
+                    legacy.add(_hit_source(str(chunk_id), metadata))
+                    continue
                 sentences, _ = _chunk_sentences(str(chunk_id), document, metadata)
                 if not any(sentence_pattern.search(sentence) for sentence in sentences):
                     continue
-            if max_chunks and len(hits) >= max_chunks:  # exact cap, even mid-batch
+            if max_chunks and len(hits) >= max_chunks and not legacy:  # exact cap, even mid-batch
                 capped = True
                 break
             hits[str(chunk_id)] = {
@@ -127,6 +133,8 @@ def keyword_hits(
         if capped or len(ids) < batch_size:
             break
         offset += len(ids)
+    if legacy:
+        raise _legacy_sources_error(sorted(legacy))
     if capped:
         progress(
             f"[warn] keyword retrieval for '{term}' hit the cap of {max_chunks} "

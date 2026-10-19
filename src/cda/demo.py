@@ -11,11 +11,12 @@ the ~90 MB embedding model once).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from cda.config import Config, load_config
 from cda.corpus.embeddings import get_embedder
-from cda.corpus.ingest import get_collection, ingest_records
+from cda.corpus.ingest import corpus_lock, get_collection, ingest_records
 
 TOY_JSONL = "toy_corpus/abstracts.jsonl"
 # The committed demo fixtures were authored in a Claude Code session and are
@@ -112,19 +113,25 @@ def load_toy_records(demo_dir: Path) -> list[dict]:
     return records
 
 
-def ensure_toy_corpus_ingested(config: Config, demo_dir: Path, embedder) -> None:
+def ensure_toy_corpus_ingested(
+    config: Config, demo_dir: Path, embedder, progress: Callable[[str], None] = print
+) -> None:
     """Ingest the committed abstracts once; later runs reuse the local store.
 
     ``ingest_records`` skips records that are already stored, so this call is
     cheap on a complete store — and it completes a *partial* one (a first run
     interrupted mid-indexing), instead of leaving the demo permanently unable
-    to match its recorded fixture.
+    to match its recorded fixture. The store is created under the corpus
+    lock: concurrent first visitors of a hosted demo would otherwise
+    initialize one empty store at the same time and corrupt it. Progress
+    lines, including a wait for that lock, go to ``progress``.
     """
     records = load_toy_records(demo_dir)
-    collection = get_collection(config, create=True)
-    if collection.count() == 0:
-        print(f"[demo] first run: indexing {len(records)} toy-corpus abstracts locally…")
-    ingest_records(config, embedder, records, progress=lambda message: None)
+    with corpus_lock(config, progress):
+        first_run = get_collection(config, create=True).count() == 0
+    if first_run:
+        progress(f"[demo] first run: indexing {len(records)} toy-corpus abstracts locally…")
+    ingest_records(config, embedder, records, progress=progress)
 
 
 def run_demo(
@@ -140,12 +147,14 @@ def run_demo(
     return_passages: bool = False,
     draft_texts: dict[str, str] | None = None,
     persist: bool = True,
+    progress: Callable[[str], None] = print,
 ) -> dict:
     """Ingest the toy corpus if needed, then run the real pipeline on ``term``.
 
     ``drafts_dir`` and ``output_dir`` let a caller scope one run's inputs and
     outputs to a directory of its own; the GUI uses this to keep concurrent
-    visitors' pasted text and reports apart.
+    visitors' pasted text and reports apart. Every progress line of the
+    ingest and the analysis goes to ``progress`` (the GUI streams it).
 
     A mock run replays the fixture recorded under the configured
     ``llm.model`` (what a live ``record_fixtures`` demo writes) and falls back
@@ -161,9 +170,9 @@ def run_demo(
     )
     embedder = get_embedder(config)
 
-    print(f"[demo] toy corpus: {directory / 'toy_corpus'}")
-    print("[demo] the demo runs the full CDA pipeline with the paper's default parameters")
-    ensure_toy_corpus_ingested(config, directory, embedder)
+    progress(f"[demo] toy corpus: {directory / 'toy_corpus'}")
+    progress("[demo] the demo runs the full CDA pipeline with the paper's default parameters")
+    ensure_toy_corpus_ingested(config, directory, embedder, progress)
 
     result = analyze_term(
         term,
@@ -178,11 +187,12 @@ def run_demo(
         return_passages=return_passages,
         draft_texts=draft_texts,
         persist=persist,
+        progress=progress,
     )
     if result["status"] == "ok":
-        print("\n[demo] done — open the report:")
-        print(f"       {result['report_file']}")
-        print("[demo] reference outputs for comparison: demo/expected_reports/")
+        progress("\n[demo] done — open the report:")
+        progress(f"       {result['report_file']}")
+        progress("[demo] reference outputs for comparison: demo/expected_reports/")
     elif result["status"] == "skipped":
-        print(f"[demo] skipped: {result['reason']}")
+        progress(f"[demo] skipped: {result['reason']}")
     return result

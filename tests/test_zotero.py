@@ -712,13 +712,17 @@ def test_a_held_ingest_lock_is_waited_on_then_reported(tmp_path, fake_embedder, 
     """Two first-run ingests of one fresh store both saw every record absent
     and both added; Chroma silently kept the existing rows and the landed-count
     check raised a corpus-corruption-shaped error for a transient race. The
-    lockfile serializes them; a lock that never clears must name itself."""
+    lockfile serializes them; a lock that never clears must name itself.
+    The holder here is a live process (this one): a lock whose process is
+    gone is reclaimed instead (see test_corpus_lock_edge_cases)."""
+    import os
+
     import cda.corpus.ingest as ing
     from cda.config import load_config
 
     corpus_dir = tmp_path / "corpus"
     (corpus_dir / "chroma").mkdir(parents=True)
-    (corpus_dir / "chroma" / ".ingest.lock").write_text("12345\n")
+    (corpus_dir / "chroma" / ".ingest.lock").write_text(f"{os.getpid()}\n")
     monkeypatch.setattr(ing, "_INGEST_LOCK_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr(ing, "_INGEST_LOCK_POLL_SECONDS", 0.01)
 
@@ -732,7 +736,7 @@ def test_a_held_ingest_lock_is_waited_on_then_reported(tmp_path, fake_embedder, 
             progress=messages.append,
         )
     assert any("another ingest" in m.lower() for m in messages)
-    # The stale lock is not cleaned up by the waiter: it belongs to the holder.
+    # A live holder's lock is not cleaned up by the waiter: it belongs to the holder.
     assert (corpus_dir / "chroma" / ".ingest.lock").exists()
 
 

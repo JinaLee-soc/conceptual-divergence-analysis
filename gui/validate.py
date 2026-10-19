@@ -321,7 +321,11 @@ def render_validate_tab(config, mock_llm: bool, key_ok: bool) -> None:
                     find_latest_session(config.path("paths.output_dir"), term)
                 )
                 st.rerun()
-            except FileNotFoundError as exc:
+            except (FileNotFoundError, ValueError) as exc:
+                # FileNotFoundError: no intact session for this term (the
+                # message lists any damaged ones that were skipped).
+                # ValueError: a session record that cannot be read — shown,
+                # not raised, so the page keeps its state and its advice.
                 st.error(str(exc))
 
     session_dir, session = _validation_session()

@@ -15,6 +15,7 @@ from pathlib import Path
 from cda import __version__
 from cda.config import Config, ConfigError, load_config
 from cda.corpus.embeddings import EmbeddingModelError
+from cda.corpus.ingest import CorpusLockError
 from cda.diagnose.openalex import OpenAlexError
 from cda.llm.base import LLMError
 
@@ -281,6 +282,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             return 1
         from datetime import datetime
 
+        from cda.extraction.windows import term_identity
         from cda.validation.report import render_validation_report, write_validation_outputs
         from cda.validation.session import load_session, session_lock
 
@@ -296,11 +298,13 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # interleaving with a concurrent save.
         with session_lock(session_dir):
             session = load_session(session_dir)
-            if session["term"] != args.term:
+            # Same comparison as result lookup: case and spacing do not make
+            # a different term, so `--term AI` resumes a session saved as "ai".
+            if term_identity(str(session["term"])) != term_identity(args.term):
                 print(
                     f"error: the session at {session_dir} is for term "
                     f"'{session['term']}', not '{args.term}'. Point --session at a "
-                    "session for this term, or change --term.",
+                    f"session for this term, or rerun with --term '{session['term']}'.",
                     file=sys.stderr,
                 )
                 return 1
@@ -673,6 +677,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except (
         ConfigError,
+        CorpusLockError,
         LLMError,
         OpenAlexError,
         EmbeddingModelError,

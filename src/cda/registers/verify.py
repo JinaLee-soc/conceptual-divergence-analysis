@@ -26,7 +26,9 @@ it does not adjudicate it.
 
 from __future__ import annotations
 
+import codecs
 import re
+import shlex
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +60,11 @@ _LEGACY_COMPUTED_HEADING = "\n## Clustering Stability (computed)\n"
 # files can't match (their names continue past the timestamp).
 _RUN_REPORT = re.compile(r"^drift_(?P<slug>.+)_(?P<ts>\d{8}_\d{6})(?:-(?P<n>\d+))?\.md$")
 _SAVED_TERM = re.compile(r'\ATARGET TERM: "(.*?)"(?:\r?\n|\Z)', re.DOTALL)
+# How much of a saved prompt the finder reads to learn its target term: the
+# TARGET TERM line is the first line, so a bounded head is enough, and the
+# prompt body (tens of KB of cluster summaries) is read only for the one run
+# that gets verified.
+_PROMPT_HEAD_BYTES = 4096
 
 
 def find_latest_run(output_dir: Path, term: str) -> tuple[Path, Path]:
@@ -73,27 +80,73 @@ def find_latest_run(output_dir: Path, term: str) -> tuple[Path, Path]:
     sort, a run for "novelty claims" would always shadow every run for
     "novelty" ('c' sorts above the timestamp digits), silently verifying the
     wrong term's analysis.
+
+    Only the head of each same-slug prompt is read, and a prompt whose head
+    cannot be read, decoded, or identified is skipped rather than fatal: one
+    damaged OLDER prompt (a full disk, an interrupted copy) must not block
+    verification of a good newer run, nor have the advice name the wrong
+    file. The chosen run's files are read in full by the caller, where a
+    damaged file is reported for the run actually being verified.
     """
     slug = safe_term_slug(term)
     candidates = []
+    skipped: list[tuple[str, str]] = []
     if output_dir.is_dir():
         for path in output_dir.iterdir():
             match = _RUN_REPORT.match(path.name)
             if match is None or match.group("slug") != slug:
                 continue
             prompt = path.with_name(f"{path.stem}_prompt.md")
-            if prompt.exists():
-                saved_term = _SAVED_TERM.match(_read_run_file(prompt))
-                if saved_term and term_identity(saved_term.group(1)) == term_identity(term):
-                    candidates.append((match.group("ts"), int(match.group("n") or 0), prompt, path))
+            if not prompt.exists():
+                continue
+            try:
+                head = _read_prompt_head(prompt)
+            except OSError as exc:
+                skipped.append((prompt.name, exc.strerror or type(exc).__name__))
+                continue
+            except UnicodeDecodeError as exc:
+                skipped.append((prompt.name, f"not UTF-8 ({exc.reason} at byte {exc.start})"))
+                continue
+            saved_term = _SAVED_TERM.match(head)
+            if saved_term is None:
+                skipped.append((prompt.name, "no TARGET TERM line"))
+                continue
+            if term_identity(saved_term.group(1)) == term_identity(term):
+                candidates.append((match.group("ts"), int(match.group("n") or 0), prompt, path))
     if not candidates:
+        detail = ""
+        if skipped:
+            listed = "; ".join(f"{name}: {reason}" for name, reason in sorted(skipped))
+            detail = (
+                f" {len(skipped)} same-slug run(s) were skipped because their saved "
+                f"prompt could not be read or identified ({listed}); such files are "
+                "probably damaged (a full disk, an interrupted copy) — delete them."
+            )
         raise FileNotFoundError(
             f"No complete previous run for '{term}' found in {output_dir} (a report "
-            "with its matching saved prompt and target term). Run `cda analyze --term "
-            f"{term}` (or the demo) first."
+            f"with its matching saved prompt and target term).{detail} Run "
+            f"`cda analyze --term {shlex.quote(term)}` (or the demo) first."
         )
     _, _, prompt, report = max(candidates, key=lambda entry: (entry[0], entry[1]))
     return prompt, report
+
+
+def _read_prompt_head(prompt: Path) -> str:
+    """The first ``_PROMPT_HEAD_BYTES`` of a saved prompt, decoded strictly.
+
+    Raises ``OSError`` when the file cannot be opened or read and
+    ``UnicodeDecodeError`` when the head is not UTF-8. A multi-byte character
+    cut by the head boundary is not an error (the decoder holds it back), and
+    a leading UTF-8 BOM — the mark an editor such as Notepad adds — is
+    dropped so the TARGET TERM line still starts the text.
+    """
+    with prompt.open("rb") as handle:
+        data = handle.read(_PROMPT_HEAD_BYTES)
+    whole_file = len(data) < _PROMPT_HEAD_BYTES
+    if data.startswith(codecs.BOM_UTF8):
+        data = data[len(codecs.BOM_UTF8) :]
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    return decoder.decode(data, final=whole_file)
 
 
 def _read_run_file(path: Path) -> str:
@@ -329,7 +382,7 @@ def run_verify(
             f"verification model '{spec}', and none ships with CDA — the demo "
             "records the primary model only. The one way to create it is a "
             "single live run of this same command:\n"
-            f"  cda verify --term {term} --record-fixtures "
+            f"  cda verify --term {shlex.quote(term)} --record-fixtures "
             f"--fixtures-dir {fixtures_dir}\n"
             "with ANTHROPIC_API_KEY (or OPENAI_API_KEY) set and --mock-llm "
             "dropped. After that, --mock-llm replays it for free."

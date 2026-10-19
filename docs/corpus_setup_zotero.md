@@ -193,10 +193,17 @@ cda ingest --pdf-dir ~/Library --exclude outputs --exclude notes
 
 A pattern that matches a directory name skips that whole sub-tree; a pattern
 with wildcards (`--exclude '*.draft.pdf'`) is matched against each file's path
-relative to `--pdf-dir`. Both are also settable as `corpus.recursive` and
-`corpus.exclude` in your config, in which case the flags add to them. The run
-reports how many files each rule skipped, so you can check the count against
-what you expected before trusting the corpus.
+relative to `--pdf-dir`. Symlinked folders are followed, but each PDF is
+judged once, by its canonical route: the file's real path relative to
+`--pdf-dir` when it lies inside the library, or, for a link to a folder
+outside it, the first route found in sorted order. A symlink elsewhere in the
+tree therefore neither hides a PDF whose real folder is included nor keeps
+one whose real folder is excluded (`shortcuts/c -> ../confidential` does not
+defeat `--exclude confidential`), and the corpus records the canonical route.
+Both flags are also settable as `corpus.recursive` and `corpus.exclude` in
+your config, in which case the flags add to them. The run reports how many
+files each rule skipped, so you can check the count against what you expected
+before trusting the corpus.
 
 
 ### Changes to stored inputs

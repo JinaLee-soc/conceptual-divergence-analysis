@@ -19,7 +19,7 @@ import streamlit as st
 
 from cda import __version__
 from cda.config import Config, load_config
-from cda.corpus.ingest import get_collection, ingest_pdf_dir
+from cda.corpus.ingest import CorpusLockError, get_collection, ingest_pdf_dir
 from cda.registers.prompt_loader import load_system_prompt
 
 # The GUI is a plain script directory, not a package; make sibling modules
@@ -32,7 +32,6 @@ from shared import (  # noqa: E402
     render_report_file,
     run_with_live_log,
     session_api_key,
-    session_key_in_env,
     session_mailto_in_env,
     usage_statistics_note,
 )
@@ -302,6 +301,13 @@ def _demo_failure_message(exc: Exception, term: str) -> str:
     """
     from cda.llm.base import FixtureMissError
 
+    if isinstance(exc, CorpusLockError):
+        # The toy corpus is shared by every visitor; a wait that ran out is
+        # a transient condition the visitor can act on, so it is explained
+        # in both modes (its text names the lock file, so publicly without).
+        if DEMO_MODE:
+            return "Another run holds the corpus; please retry in a moment."
+        return str(exc)
     if not isinstance(exc, FixtureMissError):
         if DEMO_MODE:
             return f"The demo failed on this server ({type(exc).__name__})."
@@ -323,6 +329,18 @@ def _demo_failure_message(exc: Exception, term: str) -> str:
         "recording before the committed one.\n\n"
         f"Technical detail:\n\n```\n{exc}\n```"
     )
+
+
+def _own_text_failure_message(exc: Exception) -> str:
+    """The error for a failed own-text run.
+
+    The public demo never prints exception text: it can carry absolute paths
+    on the host. A lock wait that ran out is the one failure a visitor can
+    act on, so it is named (without the path).
+    """
+    if isinstance(exc, CorpusLockError):
+        return "Another run holds the corpus; please retry in a moment." if DEMO_MODE else str(exc)
+    return f"The preview failed ({type(exc).__name__})." if DEMO_MODE else str(exc)
 
 
 def _own_text_skip_message(result: dict, term: str) -> str:
@@ -427,33 +445,33 @@ def render_demo_button(mock_llm: bool, output_dir: str) -> None:
             # Free replay: keep the default demo/_runtime/outputs, out of the
             # way of the researcher's real reports.
             demo_output_dir = None
-        with st.status("Running the demo on the toy corpus…", expanded=True) as box:
-            try:
-                with session_key_in_env():
-                    result = run_demo(
-                        term=demo_term,
-                        # Replay is forced on the public demo: this host has no
-                        # key to spend.
-                        mock=True if DEMO_MODE else mock_llm,
-                        # A live demo records its response under the
-                        # configured model (same rule as the Analyze and
-                        # Validate tabs); mock replay prefers that recording
-                        # and falls back to the committed claude-code-session
-                        # fixture, so one paid run makes replay work on this
-                        # machine even where the committed fixture does not.
-                        record_fixtures=live_demo,
-                        # A deliberate live rerun replaces this machine's
-                        # earlier recording, as on the Analyze tab; without
-                        # it the second paid click is refused.
-                        overwrite_fixtures=live_demo,
-                        output_dir=demo_output_dir,
-                        return_passages=True,
-                    )
-                box.update(label="Demo finished", state="complete")
-            except Exception as exc:
-                box.update(label="Demo failed", state="error")
-                st.error(_demo_failure_message(exc, demo_term))
-                result = None
+        # Streamed like the Analyze tab, so a wait for the corpus lock (the
+        # toy store is shared by every visitor) and the ingest's own lines
+        # are visible instead of a silent spinner.
+        result = run_with_live_log(
+            lambda progress: run_demo(
+                term=demo_term,
+                # Replay is forced on the public demo: this host has no
+                # key to spend.
+                mock=True if DEMO_MODE else mock_llm,
+                # A live demo records its response under the
+                # configured model (same rule as the Analyze and
+                # Validate tabs); mock replay prefers that recording
+                # and falls back to the committed claude-code-session
+                # fixture, so one paid run makes replay work on this
+                # machine even where the committed fixture does not.
+                record_fixtures=live_demo,
+                # A deliberate live rerun replaces this machine's
+                # earlier recording, as on the Analyze tab; without
+                # it the second paid click is refused.
+                overwrite_fixtures=live_demo,
+                output_dir=demo_output_dir,
+                return_passages=True,
+                progress=progress,
+            ),
+            status_label="Running the demo on the toy corpus…",
+            failure_message=lambda exc: _demo_failure_message(exc, demo_term),
+        )
         # Kept in session state so the result survives the rerun every later
         # widget interaction (the download button included) triggers — the
         # same rule render_emergence_expander states: a blank panel after a
@@ -559,30 +577,23 @@ def render_own_text_panel(key_ok: bool) -> None:
                     Path(output_dir).expanduser() if run_own == "live" else session_root / "outputs"
                 )
 
-            with st.status("Analyzing your text against the toy literature…", expanded=True) as box:
-                try:
-                    # The provider reads the key from the environment; the
-                    # sidebar key lives in session state.
-                    with session_key_in_env():
-                        result = run_demo(
-                            term=own_term,
-                            mock=False,
-                            dry_run=(run_own == "dry"),
-                            drafts_dir=own_drafts_dir,
-                            draft_texts={"your_text.md": own_text} if DEMO_MODE else None,
-                            persist=not DEMO_MODE,
-                            output_dir=own_output_dir,
-                            return_passages=True,
-                        )
-                    box.update(label="Finished", state="complete")
-                except Exception as exc:
-                    box.update(label="Failed", state="error")
-                    # The public demo never prints exception text: it can
-                    # carry absolute paths on the host.
-                    st.error(
-                        f"The preview failed ({type(exc).__name__})." if DEMO_MODE else str(exc)
-                    )
-                    result = None
+            # run_with_live_log exposes the sidebar key to the provider for
+            # this one call and streams the run's lines (lock waits included).
+            result = run_with_live_log(
+                lambda progress: run_demo(
+                    term=own_term,
+                    mock=False,
+                    dry_run=(run_own == "dry"),
+                    drafts_dir=own_drafts_dir,
+                    draft_texts={"your_text.md": own_text} if DEMO_MODE else None,
+                    persist=not DEMO_MODE,
+                    output_dir=own_output_dir,
+                    return_passages=True,
+                    progress=progress,
+                ),
+                status_label="Analyzing your text against the toy literature…",
+                failure_message=_own_text_failure_message,
+            )
             # Session state, not a local: the paid result must survive the
             # rerun that any later widget interaction (its own download button
             # included) triggers.
