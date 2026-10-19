@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from dateutil.parser import isoparse
 
@@ -34,9 +34,11 @@ def normalize_key(filename: str) -> str:
     Accents are folded to their ASCII skeleton (NFKD, combining marks dropped)
     so NFC and NFD spellings of one name give one key. The key is empty for a
     fully non-ASCII name; callers treat "" as "no key" and never index or
-    look it up.
+    look it up. A path with backslashes (a Zotero export written on Windows)
+    is split as a Windows path.
     """
-    base = Path(str(filename)).name.lower()
+    filename = str(filename)
+    base = (PureWindowsPath if "\\" in filename else Path)(filename).name.lower()
     base = re.sub(r"\.pdf$", "", base)
     base = unicodedata.normalize("NFKD", base)
     base = "".join(ch for ch in base if not unicodedata.combining(ch))
@@ -289,6 +291,32 @@ def build_doi_index(records: list[ZoteroRecord]) -> dict[str, ZoteroRecord | Non
     return _unique_index((normalize_doi(record.doi), record) for record in records)
 
 
+# Section-like titles that many library items share (editorials, front
+# matter, replies). They appear on nearly every first page, so as title keys
+# they would make every content match ambiguous; they are not indexed.
+_GENERIC_TITLES = frozenset(
+    normalize_title(title)
+    for title in (
+        "Introduction",
+        "Editorial",
+        "Preface",
+        "Foreword",
+        "Conclusion",
+        "Conclusions",
+        "Reply",
+        "Comment",
+        "Erratum",
+        "Correction",
+        "Book Review",
+        "Index",
+        "Abstract",
+        "Acknowledgments",
+        "Acknowledgements",
+        "Response",
+    )
+)
+
+
 def build_title_index(records: list[ZoteroRecord]) -> dict[str, ZoteroRecord | None]:
     """Map a normalized title key to record (see ``_unique_index``).
 
@@ -296,10 +324,12 @@ def build_title_index(records: list[ZoteroRecord]) -> dict[str, ZoteroRecord | N
     the whole normalized title when it is shorter. Short titles are indexed
     too: a short library title quoted on another work's first page must
     make that page ambiguous instead of leaving a cited work's title as the
-    only match.
+    only match. Generic titles (``_GENERIC_TITLES``) are not indexed.
     """
     return _unique_index(
-        (normalize_title(record.title)[:_TITLE_PREFIX_CHARS], record) for record in records
+        (normalize_title(record.title)[:_TITLE_PREFIX_CHARS], record)
+        for record in records
+        if normalize_title(record.title) not in _GENERIC_TITLES
     )
 
 

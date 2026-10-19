@@ -18,6 +18,7 @@ from __future__ import annotations
 from cda.clustering.joint import composition_note
 from cda.config import Config, ConfigError
 from cda.corpus.timeframe import describe_timeframe
+from cda.divergence.report import silhouette_text
 from cda.types import ClusterSummary, JointClustering, Passage, passage_theme_tags
 
 
@@ -45,18 +46,32 @@ def format_cluster_block(summary: ClusterSummary) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _is_text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip().lstrip("#").strip())
+
+
 def _theme_line(theme) -> str:
-    """One theme entry as a prompt line: a bare tag string or a {tag, description} mapping."""
-    if isinstance(theme, str) and theme.strip():
+    """One theme entry as a prompt line: a bare tag string or a {tag, description} mapping.
+
+    A tag or description that is empty or null (YAML ``tag:`` with no value)
+    is refused rather than rendered as "#None" or "— None".
+    """
+    if _is_text(theme):
         return f"  #{theme.strip().lstrip('#')}"
-    if isinstance(theme, dict) and str(theme.get("tag", "")).strip():
-        tag = str(theme["tag"]).strip().lstrip("#")
-        description = str(theme.get("description", "")).strip()
-        return f"  #{tag} — {description}" if description else f"  #{tag}"
-    raise ConfigError(
-        f"themes entry {theme!r} is neither a tag string nor a mapping with a 'tag'; "
-        "fix or remove it."
-    )
+    if not isinstance(theme, dict) or not _is_text(theme.get("tag")):
+        raise ConfigError(
+            f"themes entry {theme!r} is neither a tag string nor a mapping with a 'tag'; "
+            "fix or remove it."
+        )
+    tag = theme["tag"].strip().lstrip("#")
+    if "description" not in theme:
+        return f"  #{tag}"
+    if not _is_text(theme["description"]):
+        raise ConfigError(
+            f"themes entry {theme!r} has an empty or non-text 'description'; give it "
+            "text or remove the 'description' key."
+        )
+    return f"  #{tag} — {theme['description'].strip()}"
 
 
 def configured_theme_lines(config: Config) -> list[str]:
@@ -122,7 +137,7 @@ def _mode_note(joint: JointClustering | None) -> str:
     return (
         "Clustering mode: JOINT — researcher and literature passages were pooled "
         "into ONE spherical k-means partition "
-        f"(joint k={joint.n_clusters}, silhouette={joint.silhouette:.3f} on the "
+        f"(joint k={joint.n_clusters}, silhouette={silhouette_text(joint)} on the "
         "pooled passages). The two blocks below are two views of that single "
         "partition: the SAME cluster number denotes the SAME region of embedding "
         "space in both. A cluster missing from one block contains no passages "
@@ -147,12 +162,12 @@ def build_user_prompt(
         _mode_note(joint),
         (
             f"Researcher clustering: k={researcher_summary.n_clusters}, "
-            f"silhouette={researcher_summary.silhouette:.3f}, "
+            f"silhouette={silhouette_text(researcher_summary)}, "
             f"N={researcher_summary.n_total_passages}. {researcher_summary.note}."
         ),
         (
             f"Literature clustering: k={literature_summary.n_clusters}, "
-            f"silhouette={literature_summary.silhouette:.3f}, "
+            f"silhouette={silhouette_text(literature_summary)}, "
             f"N={literature_summary.n_total_passages}. {literature_summary.note}."
         ),
     ]

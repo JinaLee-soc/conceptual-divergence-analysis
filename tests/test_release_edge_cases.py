@@ -330,8 +330,10 @@ def test_pruning_does_not_treat_an_inaccessible_folder_as_missing(
         return real(path)
 
     monkeypatch.setattr(ing.os, "listdir", denied)
-    with pytest.raises(PermissionError, match="directory access"):
-        ing.ingest_pdf_dir(
-            tmp_config, fake_embedder, library, prune_missing=True, progress=lambda _: None
-        )
+    messages: list[str] = []
+    stats = ing.ingest_pdf_dir(
+        tmp_config, fake_embedder, library, prune_missing=True, progress=messages.append
+    )
     assert _snapshot(ing.get_collection(tmp_config)) == before
+    assert stats["pdfs_unchecked"] == 1 and stats["pdfs_pruned"] == 0
+    assert any("could not check; not pruned" in m and "paper.pdf" in m for m in messages)

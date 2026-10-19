@@ -5,6 +5,65 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Review fixes
+
+**Re-ingest required.** The sentence segmenter is now `pysbd-0.3.4+blocks-v3`
+(CJK full stops end sentences); your usual `cda ingest` refreshes existing
+corpora once.
+
+- `--exclude`, `--no-recursive` and MyWork `filename_patterns` match file and
+  folder names in either Unicode form (NFC or NFD), so excluded folders are no
+  longer ingested and then pruned.
+- Sources stored before library roots were recorded are adopted when found at
+  the same path, or replaced when renamed, instead of blocking analysis; the
+  analysis error names every legacy source.
+- Phrase terms match any run of whitespace, including non-breaking spaces.
+- Context windows over a chunk overlap are merged instead of stopping analysis.
+- A folder that cannot be read is reported and never pruned; the ingest
+  finishes. Hidden and AppleDouble (`._`) files in the drafts folder are
+  skipped with a note.
+- Running heads and page numbers are removed from PDF drafts, so a .docx and
+  its PDF export are refused as near-duplicates.
+- Generic library titles ("Introduction", "Editorial" and similar) are not used
+  for Zotero title matching; Windows attachment paths in a CSV are read.
+- Date bounds accept one-digit hours and refuse AM/PM or time-zone names.
+- docx list markers are removed; typed HTML in prose is kept. Symlinked
+  sub-folders under `--pdf-dir` are followed. Japanese voicing marks are kept
+  in MyWork titles. The ingest summary counts sources unchanged by a Zotero
+  export.
+- Quotation grounding treats straight quotes touching a letter of any script,
+  or spaced inner quotes, as ambiguous nesting; reads ". . ." as an elision,
+  source names containing "]", blockquote continuations and a final ";";
+  ellipses no longer count as words.
+- The cluster–register audit reads more negations ("cannot", "never",
+  "is not observed", "merge count 0") and chooses register-table columns by
+  header.
+- `cda verify` reads every distance rating on a line and never a cluster id.
+- `figure.*`, `distance_scale` and `llm.temperature` (0–1 for Anthropic, 0–2
+  for `openai:` models) are validated before retrieval; theme entries with an
+  empty tag or description are refused.
+- The mock demo prefers a fixture recorded under the configured model and
+  falls back to the committed demo responses; the report names the model
+  replayed. The record-fixtures workflow commits new recordings and checks
+  that they replay.
+- Run files are written on filesystems without hard links.
+- Embedding provenance resolves short model names; run comparison checks the
+  model id, revision and weight, configuration and tokenizer file hashes.
+- Passage-map palettes cover the configured maximum k with distinct colours.
+- Silhouettes are scored on a sample that includes every cluster, so a pinned
+  k no longer fails and no candidate is dropped by sampling.
+- When no valid partition is found, the stability section and report say so
+  instead of reporting robust structure; silhouettes show "n/a".
+- The order-stability benchmark refuses pinned-k and hierarchical configs; the
+  bootstrap benchmark clusters as `cda analyze` does and checks its inputs; the
+  saturation diagnostics use the configured ranking. Flag thresholds refuse
+  booleans and non-whole counts.
+- Applying a curation edit or recut withdraws an endorsement; the report and
+  GUI show the withdrawal.
+- GUI alerts are distinguishable without colour (border style and a text
+  label); the public demo never shows host paths.
+- `cda diagnose --demo` builds the toy corpus first; CI also tests Python 3.13.
+
 ### GUI display repairs
 
 - The public demo's installation command enters the cloned directory.

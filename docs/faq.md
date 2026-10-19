@@ -83,7 +83,13 @@ Fixtures replay responses for byte-identical prompts. If you changed config
 values, the prompt file, or the toy corpus, the fingerprint no longer
 matches — the error message lists the expected key and the two ways forward
 (run the unmodified demo, or record your own fixtures on a live run with
-`--record-fixtures`).
+`--record-fixtures`). The clustering inside the prompt can also differ
+between CPU architectures, so the committed demo fixtures may miss on your
+machine even unmodified. A live `cda demo --term … --record-fixtures` (or the
+GUI demo button with the mock toggle off) records a fixture under your
+configured `llm.model`; later mock demo runs replay it before falling back
+to the committed `claude-code-session` fixture, and the report header names
+the model whose response was replayed.
 
 **How does CDA relate to other research-infrastructure tools?**
 CDA is the *individual-level, term-register* instrument in a growing

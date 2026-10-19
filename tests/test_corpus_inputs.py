@@ -113,7 +113,7 @@ def test_paragraph_whitespace_keeps_punctuation_with_the_previous_sentence():
 
 def test_segmenter_identity_marks_block_segmentation():
     """Stored corpora segmented whole-text must be refreshed by the next ingest."""
-    assert windows.SENTENCE_SEGMENTER == f"pysbd-{pysbd.__version__}+blocks-v2"
+    assert windows.SENTENCE_SEGMENTER == f"pysbd-{pysbd.__version__}+blocks-v3"
 
 
 # --- a new Zotero export updates metadata in place -----------------------

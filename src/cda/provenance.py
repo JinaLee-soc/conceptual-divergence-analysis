@@ -370,11 +370,42 @@ def _package_differences(current: list[dict], reference: list[dict]) -> dict:
     return differences
 
 
-def _deterministic_embedding(manifest: dict) -> dict:
+# Snapshot files that determine the vectors: weights, model and pooling
+# configs, and tokenizer files. READMEs, ONNX/OpenVINO exports and other
+# snapshot extras do not, so they never decide a comparison.
+_IDENTITY_FILE_NAMES = frozenset(
+    {
+        "model.safetensors",
+        "pytorch_model.bin",
+        "config.json",
+        "config_sentence_transformers.json",
+        "sentence_bert_config.json",
+        "modules.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.txt",
+        "vocab.json",
+        "merges.txt",
+        "added_tokens.json",
+        "spiece.model",
+        "sentencepiece.bpe.model",
+    }
+)
+
+
+def _embedding_identity(manifest: dict) -> dict:
+    """Model id, resolved revision and the hashes of the files that make the vectors."""
+    from cda.corpus.embeddings import hub_model_id
+
+    embedding = manifest["embedding"]
+    files = embedding.get("files") or {}
     return {
-        key: value
-        for key, value in manifest["embedding"].items()
-        if key not in _MACHINE_EMBEDDING_FIELDS
+        "model_id": embedding.get("model_id") or hub_model_id(str(embedding.get("name", ""))),
+        "resolved_revision": embedding.get("resolved_revision"),
+        "files": {
+            path: sha for path, sha in files.items() if Path(path).name in _IDENTITY_FILE_NAMES
+        },
     }
 
 
@@ -412,7 +443,7 @@ def compare_runs(current: Path, reference: Path, *, strict_environment: bool = F
         )
         if manifests[0][field] != manifests[1][field]
     ]
-    if _deterministic_embedding(manifests[0]) != _deterministic_embedding(manifests[1]):
+    if _embedding_identity(manifests[0]) != _embedding_identity(manifests[1]):
         mismatches.append("embedding")
     if manifests[0]["code"]["sha256"] != manifests[1]["code"]["sha256"]:
         mismatches.append("installed_code")

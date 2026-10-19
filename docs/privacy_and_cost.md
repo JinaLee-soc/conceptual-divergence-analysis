@@ -95,16 +95,22 @@ audit) are unaffected.
   any live run — preview it first with the free dry-run button).
 - Your **Zotero library** — read once from a CSV export on disk; CDA never
   connects to Zotero or its API.
-- **Recorded fixtures** (`--record-fixtures`; the GUI's live Analyze and
-  demo runs record automatically so a later mock run can replay them) —
-  written locally, by default
-  under your git-ignored output directory (`<output_dir>/fixtures` for
-  `cda analyze`; the demo records to `demo/fixtures`). Recording never
-  replaces a fixture that already replays: `cda analyze --record-fixtures`
-  refuses before the paid call unless you add `--overwrite-fixtures`. A
-  fixture contains the model's reply, which quotes corpus passages — treat
-  fixtures from a real corpus like reports: keep them out of public
-  repositories.
+- **Recorded fixtures** (`--record-fixtures`; the GUI's live Analyze,
+  Validate, and demo runs record automatically so a later mock run can
+  replay them) — written locally: `<output_dir>/fixtures` for `cda analyze`
+  (your git-ignored output directory) and `demo/fixtures` for the demo. A
+  fixture is keyed by the configured model and the exact prompt, so a
+  recording never touches the committed `claude-code-session` demo
+  fixtures. When a replayable fixture already exists for the same model and
+  prompt, the command-line `--record-fixtures` refuses before the paid call
+  unless you add `--overwrite-fixtures`; the GUI's live Analyze and demo
+  buttons replace it (a deliberate live rerun supersedes your earlier
+  recording). A mock demo replays the recording made under your configured
+  `llm.model` when one exists and otherwise the committed
+  `claude-code-session` fixture; the report header names the model whose
+  response was replayed. A fixture contains the model's reply, which quotes
+  corpus passages — treat fixtures from a real corpus like reports: keep
+  them out of public repositories.
 
 ## Cost and runtime
 

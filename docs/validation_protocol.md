@@ -29,6 +29,12 @@ Untouched clusters retain their verdicts and provenance; affected clusters
 require new judgments. Cluster silhouettes are recomputed to document the
 quality of the edited partition.
 
+An applied merge, split, or recut after endorsement withdraws the
+endorsement: the session records the withdrawal (with the revision it
+happened at) in its audit trail, the report shows it instead of "Endorsed",
+and the GUI offers Endorse again once the changed clusters have verdicts.
+Recuts are available in the GUI's Validate tab only.
+
 Agreement statistics always use the original clustering. Curated partitions
 are not fed into `cda analyze`, re-analyzed, or emitted as canonical CDA reports.
 The original analysis outputs remain unchanged.

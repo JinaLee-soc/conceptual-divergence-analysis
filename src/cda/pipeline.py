@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -38,7 +38,7 @@ from cda.extraction.draft_passages import extract_draft_passages
 from cda.extraction.mywork import mywork_classifier
 from cda.extraction.retrieval import build_passages, keyword_hits
 from cda.llm.mock import RecordingProvider
-from cda.llm.providers import fixture_model, get_provider
+from cda.llm.providers import fixture_model, get_provider, llm_temperature
 from cda.provenance import build_manifest, input_snapshot, sample_snapshot, seal_run
 from cda.registers.assemble import build_user_prompt, configured_theme_lines
 from cda.registers.audit import audit_report
@@ -252,14 +252,22 @@ def retrieval_params(config: Config) -> dict:
     max_chars = config.get_int("retrieval.max_window_chars", minimum=0)
     if 0 < max_chars < 4 or (max_chars and max_chars < min_chars):
         raise ConfigError(
-            f"retrieval.max_window_chars ({max_chars}) is below "
-            f"retrieval.min_window_chars ({min_chars})."
+            f"retrieval.max_window_chars must be 0 (unbounded) or at least "
+            f"max(4, retrieval.min_window_chars) = {max(4, min_chars)}, got {max_chars}."
         )
     config.get_int("retrieval.keyword_max_chunks", minimum=0)
     return {
         "window_mode": window_mode,
         "min_window_chars": min_chars,
         "max_window_chars": max_chars,
+    }
+
+
+def figure_params(config: Config) -> dict:
+    """Validated passage-map settings; the map is drawn only after the paid call."""
+    return {
+        "enabled": config.get_bool("figure.enabled", False),
+        "dpi": config.get_int("figure.dpi", 300, minimum=1),
     }
 
 
@@ -493,7 +501,8 @@ def _write_passage_map(
     on disk by the time this runs, so a missing matplotlib or a backend
     problem is reported and stepped over rather than raised.
     """
-    if not config.get_bool("figure.enabled", False):
+    figure = figure_params(config)  # validated up front by validated_settings
+    if not figure["enabled"]:
         return None
     from cda.divergence.figure import draw_passage_map
 
@@ -505,7 +514,7 @@ def _write_passage_map(
             literature_passages=literature_passages,
             joint=joint,
             path=path,
-            dpi=config.get_int("figure.dpi", 300, minimum=1),
+            dpi=figure["dpi"],
         )
     except Exception as exc:  # noqa: BLE001 - the report must survive this
         progress(f"[warn] the passage map could not be drawn ({exc})")
@@ -604,6 +613,38 @@ def map_divergence(
     return researcher_summary, literature_summary, literature_passages, saturation_info, None
 
 
+def _partition_found(corpus_summary: dict) -> bool:
+    """Summaries recorded before ``canonical_partition_found`` existed count as found."""
+    return corpus_summary.get("canonical_partition_found", True) is not False
+
+
+def _stability_progress(summary: dict, mode: str) -> str:
+    """The stability progress line; a canonical run without a valid partition
+    has no k to match, so its placeholder k=1 is never reported as a match rate."""
+    if mode == JOINT:
+        shuffled = summary["shuffled_trials"]
+        if not _partition_found(summary):
+            return f"no valid partition in the canonical order ({shuffled} shuffled orderings)"
+        return (
+            f"k={summary['canonical_k']} matched {summary['k_match_rate']:.0%} "
+            f"of {shuffled} shuffled orderings"
+        )
+    researcher, literature = summary["researcher"], summary["literature"]
+    shuffled = researcher["shuffled_trials"]
+    if _partition_found(researcher) and _partition_found(literature):
+        return (
+            f"researcher k matched {researcher['k_match_rate']:.0%}, literature k matched "
+            f"{literature['k_match_rate']:.0%} of {shuffled} shuffled orderings"
+        )
+    parts = [
+        f"{label} k matched {corpus['k_match_rate']:.0%}"
+        if _partition_found(corpus)
+        else f"{label} no valid partition"
+        for label, corpus in (("researcher", researcher), ("literature", literature))
+    ]
+    return f"{', '.join(parts)} ({shuffled} shuffled orderings)"
+
+
 def run_stability_check(
     researcher_passages: list[Passage],
     literature_passages: list[Passage],
@@ -640,25 +681,14 @@ def run_stability_check(
     trial count under 2 makes it meaningless; otherwise the ``summarize()``
     shape from ``clustering/order_stability.py``, with ``"enabled": True``.
     """
-    from cda.clustering.order_stability import run_trials, summarize
+    from cda.clustering.order_stability import resolution_override_reason, run_trials, summarize
 
     trials = config.get_int("clustering.stability_check.trials", 5, minimum=0)
     if not config.get_bool("clustering.stability_check.enabled", True) or trials < 2:
         return {"enabled": False, "trials": trials}
-    resolution = resolution_params(config)
-    if resolution["method"] != "kmeans" or resolution["fixed_k"] is not None:
-        # The check measures how the silhouette k-selection reacts to passage
-        # order. A fixed k cannot vary, and the hierarchical tree is
-        # order-independent by construction, so the statistic would be
-        # vacuous either way.
-        return {
-            "enabled": False,
-            "trials": trials,
-            "reason": (
-                "clustering.method/clustering.k override the paper's "
-                "silhouette k-selection, which is what this check measures"
-            ),
-        }
+    reason = resolution_override_reason(resolution_params(config))
+    if reason:
+        return {"enabled": False, "trials": trials, "reason": reason}
 
     max_k = max_k_params(config)
     results = run_trials(
@@ -682,11 +712,8 @@ def run_stability_check(
         expected_literature_k=expected_literature_k,
     )
     summary["enabled"] = True
+    progress(f"      stability: {_stability_progress(summary, mode)}")
     if mode == JOINT:
-        progress(
-            f"      stability: k={summary['canonical_k']} matched "
-            f"{summary['k_match_rate']:.0%} of {summary['shuffled_trials']} shuffled orderings"
-        )
         if summary.get("canonical_reproduced") is False:
             progress(
                 "      WARNING: re-clustering the canonical order did not reproduce "
@@ -694,12 +721,6 @@ def run_stability_check(
                 "for this input and the stability figures above are unreliable"
             )
     else:
-        shuffled = summary["researcher"]["shuffled_trials"]
-        progress(
-            "      stability: researcher k matched "
-            f"{summary['researcher']['k_match_rate']:.0%}, literature k matched "
-            f"{summary['literature']['k_match_rate']:.0%} of {shuffled} shuffled orderings"
-        )
         for corpus_label in ("researcher", "literature"):
             if summary[corpus_label].get("canonical_reproduced") is False:
                 progress(
@@ -750,9 +771,9 @@ def validated_settings(config: Config) -> dict:
     """Every setting that can only be wrong by a typo, validated before any work.
 
     A mistyped date, clustering mode, method/k override, retrieval window,
-    flag threshold, saturation, LLM setting or theme entry must not surface after the
-    corpus has been opened and the embedding model loaded, or silently change
-    what is analyzed.
+    flag threshold, saturation, LLM setting, figure setting or theme entry must not
+    surface after the corpus has been opened and the embedding model loaded (or
+    after the paid LLM call), or silently change what is analyzed.
     """
     return {
         "mode": clustering_mode(config),
@@ -764,8 +785,11 @@ def validated_settings(config: Config) -> dict:
         "clustering": _clustering_kwargs(config),
         "timeframe": timeframe_from_config(config),
         "max_tokens": config.get_int("llm.max_tokens", minimum=1),
-        "temperature": config.get_float("llm.temperature", minimum=0.0),
+        "temperature": llm_temperature(config, str(config.get("llm.model"))),
         "theme_lines": configured_theme_lines(config),
+        "figure": figure_params(config),
+        # Read by the report renderer after the LLM call.
+        "distance_scale": config.section("distance_scale"),
     }
 
 
@@ -799,9 +823,15 @@ def _build_provider(
     record_fixtures: bool,
     overwrite_fixtures: bool,
     fixtures_dir: str | Path | None,
+    fallback_fixture_models: Sequence[str] = (),
 ):
     """The analysis provider, built before any work so a missing key fails fast."""
-    provider = get_provider(config, mock=mock, fixtures_dir=fixtures_dir)
+    provider = get_provider(
+        config,
+        mock=mock,
+        fixtures_dir=fixtures_dir,
+        fallback_fixture_models=fallback_fixture_models,
+    )
     if not record_fixtures or mock:
         return provider
     if fixtures_dir is None:
@@ -887,6 +917,7 @@ def analyze_term(
     record_fixtures: bool = False,
     overwrite_fixtures: bool = False,
     fixtures_dir: str | Path | None = None,
+    fallback_fixture_models: Sequence[str] = (),
     embedder: Embedder | None = None,
     collection=None,
     return_passages: bool = False,
@@ -903,6 +934,8 @@ def analyze_term(
     the clustered passages for the GUI visualizations (it changes nothing
     about the analysis). ``overwrite_fixtures`` lets ``record_fixtures``
     replace an existing replayable fixture for the same prompt.
+    ``fallback_fixture_models`` lets a mock run replay a fixture recorded
+    under another model when none exists under ``llm.model``.
     """
     if not persist and not dry_run:
         raise ValueError("persist=False is supported only for a dry-run preview.")
@@ -922,6 +955,7 @@ def analyze_term(
             record_fixtures=record_fixtures,
             overwrite_fixtures=overwrite_fixtures,
             fixtures_dir=fixtures_dir,
+            fallback_fixture_models=fallback_fixture_models,
         )
     )
     embedder = embedder or get_embedder(config)

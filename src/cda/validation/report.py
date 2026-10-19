@@ -22,7 +22,12 @@ from cda.validation.metrics import (
     to_agreement_category,
     verdict_agreement,
 )
-from cda.validation.session import is_revealed, partition_for
+from cda.validation.session import (
+    current_endorsement,
+    current_revisions,
+    is_revealed,
+    partition_for,
+)
 
 
 def _fmt(value) -> str:
@@ -179,6 +184,21 @@ def _edits_section(session: dict) -> list[str]:
     return lines
 
 
+def _withdrawal_lines(session: dict) -> list[str]:
+    """Endorsements that a later applied edit retracted, oldest first.
+
+    A trailing blank line keeps the status sentence after the list from
+    being rendered as a continuation of its last item.
+    """
+    lines = [
+        f"- Endorsement of {w['at']} (revisions: {w['revisions']}) **withdrawn** at "
+        f"revision(s) {w['withdrawn_at_revisions']}: edit {w['withdrawn_by_edit']} "
+        f"changed the endorsed structure ({w['withdrawn_at']})."
+        for w in session.get("endorsement_withdrawals", [])
+    ]
+    return [*lines, ""] if lines else []
+
+
 def render_validation_report(session: dict, config: Config, now: datetime) -> str:
     endorsement = session.get("endorsement")
     sections = [
@@ -215,7 +235,15 @@ def render_validation_report(session: dict, config: Config, now: datetime) -> st
     sections.append("\n## Curation history\n")
     sections.extend(_edits_section(session))
     sections.append("\n## Status\n")
-    if endorsement:
+    sections.extend(_withdrawal_lines(session))
+    if endorsement and not current_endorsement(session):
+        sections.append(
+            f"**Endorsement out of date**: endorsed at {endorsement['at']} for "
+            f"revisions {endorsement['revisions']}, but the structure has since "
+            f"moved to {current_revisions(session)}. Session open: judge the "
+            "changed clusters and endorse again."
+        )
+    elif endorsement:
         sections.append(
             f"**Endorsed** at {endorsement['at']} (revisions: {endorsement['revisions']})."
             + (f" Note: {endorsement['note']}" if endorsement.get("note") else "")

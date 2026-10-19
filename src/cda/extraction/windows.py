@@ -19,10 +19,11 @@ from cda.config import ConfigError
 
 # Stored with every ingested chunk; analysis refuses chunks segmented by any
 # other segmenter, because sentence positions would not line up.
-# "+blocks-v2": long texts are segmented in independent blocks (see
+# "+blocks-v3": long texts are segmented in independent blocks (see
 # ``split_sentences``), which can place boundaries differently from one pysbd
-# pass over the whole text.
-SENTENCE_SEGMENTER = f"pysbd-{version('pysbd')}+blocks-v2"
+# pass over the whole text; CJK full stops end sentences without a following
+# space, and a block without any sentence end is cut at its size bound.
+SENTENCE_SEGMENTER = f"pysbd-{version('pysbd')}+blocks-v3"
 
 # pysbd's run time grows quadratically with input length, so text is segmented
 # near this character target, extending it when a sentence is longer.
@@ -69,18 +70,34 @@ def _sentence_starts(text: str, pieces: list[str]) -> list[int]:
 
 
 _SENTENCE_END = re.compile(r"[.!?][\"'\u201d\u2019)\]]*\Z")
+# Chinese and Japanese end sentences with full-width marks and no space after
+# them, so a boundary after one of these needs no whitespace.
+_CJK_SENTENCE_END = re.compile(
+    r"[\u3002\uff01\uff1f\uff0e][\"'\u201d\u2019)\]\uff09\u300d\u300f\u3011\u300b\u3009]*\Z"
+)
 
 
 def _new_segmenter() -> pysbd.Segmenter:
     return pysbd.Segmenter(language="en", clean=False, char_span=True)
 
 
-def _cut_point(block: str, limit: int) -> int:
-    """Where to cut ``block`` so the head holds at most about ``limit`` characters.
+def _after_cjk_end(text: str, position: int) -> bool:
+    """Whether ``text[:position]`` ends with a CJK sentence end, closing marks and one space allowed."""
+    position -= position > 0 and text[position - 1] == " "
+    return bool(_CJK_SENTENCE_END.search(text, max(0, position - 16), position))
+
+
+def _is_boundary(text: str, position: int) -> bool:
+    """A sentence may start at ``position``: after whitespace or right after a CJK full stop."""
+    return position > 0 and (text[position - 1] == " " or _after_cjk_end(text, position))
+
+
+def _cut_point(block: str, limit: int) -> int | None:
+    """Where to cut ``block`` so the head holds about ``limit`` characters; ``None`` if nowhere.
 
     Use the last sentence start pysbd finds near the bound after sentence-final
-    punctuation. Search farther for a long sentence; retain the text whole if
-    no boundary is found.
+    punctuation (a CJK full stop needs no space after it). Search farther for
+    a long sentence; ``None`` means the rest of the block has no sentence end.
     """
     # Extend the search when one sentence runs past the target, rather than
     # handing the entire remaining document to the quadratic segmenter.
@@ -100,9 +117,31 @@ def _cut_point(block: str, limit: int) -> int:
             cut = low + start
             if cut > 0 and block[cut - 1] == " " and _SENTENCE_END.search(block, low, cut - 1):
                 return cut
-    # Neither a size limit nor whitespace alone establishes a sentence end.
-    # Keep an unusually long sentence whole, even if it exceeds the target.
-    return len(block)
+            if cut > 0 and _after_cjk_end(block, cut):
+                return cut
+    return None
+
+
+def _block_spans(text: str, limit: int = _BLOCK_CHARS) -> list[tuple[int, int, bool]]:
+    """(start, end, forced) of each block of whitespace-normalized ``text``.
+
+    When the rest of the text has no sentence end, it is cut at the bound so
+    pysbd never sees more than ``limit`` characters of it. Such a forced cut
+    is not a sentence boundary: ``forced`` marks a block whose first sentence
+    continues the previous block's last one.
+    """
+    spans = []
+    start, forced, exhausted = 0, False, False
+    while len(text) - start > limit:
+        cut = None if exhausted else _cut_point(text[start:], limit)
+        # Once a search finds no sentence end, none lies further on either.
+        exhausted = cut is None
+        end = start + (limit if exhausted else cut)
+        spans.append((start, end - (text[end - 1] == " "), forced))
+        start, forced = end + (end < len(text) and text[end] == " "), exhausted
+    if start < len(text):
+        spans.append((start, len(text), forced))
+    return spans
 
 
 def _blocks(text: str, limit: int = _BLOCK_CHARS) -> list[str]:
@@ -112,27 +151,40 @@ def _blocks(text: str, limit: int = _BLOCK_CHARS) -> list[str]:
     like other whitespace. The limit is a performance target, never grounds
     for inventing a sentence boundary.
     """
-    blocks = []
     rest = normalize_text(text)
-    while len(rest) > limit:
-        cut = _cut_point(rest, limit)
-        blocks.append(rest[:cut].strip())
-        rest = rest[cut:].strip()
-    if rest:
-        blocks.append(rest)
-    return blocks
+    return [rest[a:b] for a, b, _ in _block_spans(rest, limit)]
 
 
-def _segment_block(text: str) -> list[str]:
-    """Sentences of one whitespace-normalized block (see ``split_sentences``)."""
+def _segment_block(text: str) -> list[tuple[int, int]]:
+    """(start, end) of the sentences of one whitespace-normalized block."""
     spans = _new_segmenter().segment(text)
     pieces = [span.sent.strip() for span in spans if span.sent.strip()]
     starts = _sentence_starts(text, pieces)
     if not starts or starts[0] > 0:
         starts.insert(0, 0)
-    bounds = [b for b in starts[1:] if text[b - 1] == " "]
+    bounds = [b for b in starts[1:] if _is_boundary(text, b)]
     edges = [0, *bounds, len(text)]
-    return [text[a:b].strip() for a, b in zip(edges, edges[1:], strict=False)]
+    return [(a, b - (text[b - 1] == " ")) for a, b in zip(edges, edges[1:], strict=False)]
+
+
+def sentence_spans(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Whitespace-normalized ``text`` and the (start, end) of each of its sentences.
+
+    Neighbouring sentences are separated by one space, or by nothing after a
+    CJK full stop. See ``split_sentences`` for the invariants.
+    """
+    normalized = normalize_text(text)
+    sentences: list[tuple[int, int]] = []
+    for block_start, block_end, forced in _block_spans(normalized):
+        block = normalized[block_start:block_end]
+        for i, (a, b) in enumerate(_segment_block(block)):
+            a, b = a + block_start, b + block_start
+            joins_previous = forced and i == 0
+            if sentences and (joins_previous or not _WORD_CHAR.search(normalized[a:b])):
+                sentences[-1] = (sentences[-1][0], b)
+            else:
+                sentences.append((a, b))
+    return normalized, sentences
 
 
 def split_sentences(text: str) -> list[str]:
@@ -140,37 +192,45 @@ def split_sentences(text: str) -> list[str]:
 
     Invariants: no character is dropped (punctuation pysbd leaves uncovered
     joins the preceding sentence, or stands alone at the start; an uncovered
-    letter or digit raises), and boundaries fall only at whitespace (pysbd
-    can split inside a token such as ".NET"; such pieces are rejoined), so
-    each sentence is a run of whole words. A segmenter holds per-call state,
-    so each call builds its own.
+    letter or digit raises), and boundaries fall only at whitespace or right
+    after a CJK full stop (pysbd can split inside a token such as ".NET"; such
+    pieces are rejoined). A segmenter holds per-call state, so each call
+    builds its own.
 
     pysbd runs separately on blocks of about ``_BLOCK_CHARS`` characters cut
     after a detected sentence end. An unusually long sentence may exceed the
-    target size; neither a blank line nor the size limit splits it.
+    target size; neither a blank line nor the size limit splits it. Text with
+    no sentence end at all is handed to pysbd in pieces of at most the block
+    size, and the pieces are rejoined.
     """
-    sentences: list[str] = []
-    for block in _blocks(text):
-        block_sentences = _segment_block(block)
-        for sentence in block_sentences:
-            if sentences and not _WORD_CHAR.search(sentence):
-                sentences[-1] = f"{sentences[-1]} {sentence}"
-            else:
-                sentences.append(sentence)
-    return sentences
+    normalized, spans = sentence_spans(text)
+    return [normalized[a:b] for a, b in spans]
+
+
+def literal_pattern(term: str) -> str:
+    r"""The escaped NFC term; any run of whitespace between its words matches ``\s+``.
+
+    A phrase typed with a double space or a no-break space still matches the
+    corpus, whose whitespace is normalized to single spaces.
+    """
+    term = unicodedata.normalize("NFC", term)
+    words = term.split()
+    return r"\s+".join(re.escape(word) for word in words) if words else re.escape(term)
 
 
 def term_regex(term: str) -> re.Pattern[str]:
     r"""Whole-word, case-insensitive match (plain substring for non-word terms).
 
-    The term is NFC-normalized, matching the NFC corpus and draft text. Each
-    ``\b`` is applied only where the term's edge character is a word
-    character, so terms like "C++" or ".NET" stay matchable. A term without
-    ASCII letters or digits (e.g. 참신성) is a plain substring, because
-    agglutinative languages attach particles directly to the term.
+    The term is NFC-normalized, matching the NFC corpus and draft text, and
+    the whitespace between its words matches any whitespace (see
+    ``literal_pattern``). Each ``\b`` is applied only where the term's edge
+    character is a word character, so terms like "C++" or ".NET" stay
+    matchable. A term without ASCII letters or digits (e.g. 참신성) is a plain
+    substring, because agglutinative languages attach particles directly to
+    the term.
     """
-    term = unicodedata.normalize("NFC", term)
-    escaped = re.escape(term)
+    escaped = literal_pattern(term)
+    term = unicodedata.normalize("NFC", term).strip() or term
     if not re.search(r"[A-Za-z0-9]", term):
         return re.compile(escaped, flags=re.IGNORECASE)
     lead = r"\b" if re.match(r"\w", term) else ""

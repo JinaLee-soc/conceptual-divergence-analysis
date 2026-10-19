@@ -35,7 +35,7 @@ from cda.corpus.zotero import (
     normalize_key,
     record_fields,
 )
-from cda.extraction.windows import SENTENCE_SEGMENTER, split_sentences
+from cda.extraction.windows import SENTENCE_SEGMENTER, sentence_spans
 from cda.provenance import digest, file_digest
 
 # Toy-corpus support: `cda demo` ingests JSONL abstracts instead of PDFs, via
@@ -173,27 +173,29 @@ def sentence_context_records(
 
     The source is segmented before chunking; word offsets then map each
     window back to its complete sentences, including sentences longer than
-    the window. ``split_sentences`` keeps whole words, so sentence word
-    counts add up to the text's. The sentences are joined by single spaces,
-    and their character lengths are stored so analysis can recover exactly
-    these sentences: re-segmenting a chunk's context alone gives different
-    boundaries than segmenting the whole document.
+    the window. Each sentence covers the words its characters touch; two
+    sentences share a word only when a CJK full stop ends one inside it. The
+    context is the normalized text from the first sentence to the last, so
+    neighbours are separated by one space or, after a CJK full stop, by
+    nothing. Their character lengths are stored so analysis can recover
+    exactly these sentences: re-segmenting a chunk's context alone gives
+    different boundaries than segmenting the whole document.
     """
-    sentences = split_sentences(text)
-    starts, ends = [], []
-    offset = 0
-    for sentence in sentences:
-        starts.append(offset)
-        offset += len(sentence.split())
-        ends.append(offset)
+    normalized, spans = sentence_spans(text)
+    spaces = [i for i, ch in enumerate(normalized) if ch == " "]
+    # Word index of a character = the spaces before it (words are space-separated).
+    starts = [bisect_left(spaces, a) for a, _ in spans]
+    ends = [bisect_left(spaces, b - 1) + 1 for _, b in spans]
+    n_words = len(spaces) + 1 if normalized else 0
     contexts = []
     for i in range(n_chunks):
         start = i * (size - overlap)
-        end = min(start + size, offset)
+        end = min(start + size, n_words)
         first = bisect_right(ends, start)
         last = bisect_left(starts, end)
-        window = sentences[first:last]
-        contexts.append((first, " ".join(window), [len(s) for s in window]))
+        window = spans[first:last]
+        context = normalized[window[0][0] : window[-1][1]] if window else ""
+        contexts.append((first, context, [b - a for a, b in window]))
     return contexts
 
 
@@ -327,15 +329,46 @@ def _same_file_elsewhere(
     ]
 
 
-def _copy_still_matches(root: str | None, relpath: str, sha256: str) -> bool:
-    """A missing copy can be renamed; a live copy must still hold the recorded bytes."""
-    if root is None or not _exists_exactly(Path(root), relpath):
+def _copy_still_matches(root: Path, relpath: str, sha256: str, unchecked: set[str]) -> bool:
+    """A missing copy can be renamed; a live copy must still hold the recorded bytes.
+
+    A copy whose folder cannot be listed is assumed to still match, so it is
+    neither renamed away nor ignored.
+    """
+    if not _exists_or_unchecked(root, relpath, unchecked):
+        return True
+    if relpath in unchecked:
         return True
     try:
-        return file_digest(Path(root) / relpath) == sha256
+        return file_digest(root / relpath) == sha256
     except OSError:
         # An unreadable candidate cannot justify dropping the readable source.
         return False
+
+
+def _exists_or_unchecked(root: Path, relpath: str, unchecked: set[str]) -> bool:
+    """``_exists_exactly``, except that a folder that cannot be listed counts as present.
+
+    Such a relpath is added to ``unchecked`` and reported at the end of the
+    run; it is never pruned or renamed away.
+    """
+    try:
+        return _exists_exactly(root, relpath)
+    except OSError:
+        unchecked.add(relpath)
+        return True
+
+
+def _adopt_root(collection, relpath: str, pdf_root: str, progress: Callable[[str], None]) -> None:
+    """Record ``pdf_root`` on every chunk of a source stored before roots were recorded."""
+    ids = collection.get(where={"pdf_relpath": relpath}, include=[])["ids"]
+    for start in range(0, len(ids), 1000):
+        batch = ids[start : start + 1000]
+        collection.update(ids=batch, metadatas=[{"pdf_root": pdf_root}] * len(batch))
+    progress(
+        f"  [ingest] {relpath}: stored without a PDF root by an older version; the same "
+        f"file is at this path under {pdf_root}, so it now belongs to this root"
+    )
 
 
 # Chunk fields that come from a Zotero export; kept when a source is refreshed
@@ -396,10 +429,12 @@ def select_pdfs(pdf_dir: Path, *, recursive: bool = True, exclude: list[str] | N
     ``recursive=False`` takes only files directly in ``pdf_dir``. An
     ``exclude`` pattern matching a directory name skips that sub-tree; a
     wildcard pattern is matched against the path relative to ``pdf_dir``. A
-    trailing slash is stripped, and the ``.pdf`` check ignores case.
+    trailing slash is stripped, and the ``.pdf`` check ignores case. Patterns
+    and paths are compared in NFC, so a composed pattern excludes a folder
+    whose name is stored decomposed (as macOS often does). Symlinked folders
+    are followed; a folder reached twice is walked once.
     """
-    walk = pdf_dir.rglob("*") if recursive else pdf_dir.glob("*")
-    found = (p for p in walk if p.suffix.lower() == ".pdf")
+    found = (p for p in _walk_files(pdf_dir, recursive) if p.suffix.lower() == ".pdf")
     kept, excluded = [], 0
     for path in sorted(p for p in found if p.is_file()):
         if _is_excluded(path.relative_to(pdf_dir), exclude):
@@ -409,14 +444,45 @@ def select_pdfs(pdf_dir: Path, *, recursive: bool = True, exclude: list[str] | N
     return kept, excluded
 
 
+def _walk_files(pdf_dir: Path, recursive: bool) -> list[Path]:
+    """Files under ``pdf_dir`` (only its top level unless ``recursive``), following folder symlinks.
+
+    The resolved path of every folder walked is remembered, so a symlink
+    cycle or a second link to one folder cannot repeat it.
+    """
+    if not recursive:
+        return list(pdf_dir.iterdir())
+    files: list[Path] = []
+    walked = {os.path.realpath(pdf_dir)}
+    for folder, subfolders, names in os.walk(pdf_dir, followlinks=True):
+        unseen = []
+        for name in sorted(subfolders):
+            real = os.path.realpath(os.path.join(folder, name))
+            if real not in walked:
+                walked.add(real)
+                unseen.append(name)
+        subfolders[:] = unseen
+        files.extend(Path(folder) / name for name in names)
+    return files
+
+
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
 def _is_excluded(relative: Path, exclude: list[str] | None, *, recursive: bool = True) -> bool:
-    """Whether a path relative to the PDF root is outside the selection of ``select_pdfs``."""
+    """Whether a path relative to the PDF root is outside the selection of ``select_pdfs``.
+
+    Both the path and the patterns are compared in NFC, so the files walked on
+    disk and the relpaths stored in the corpus (always NFC) are judged alike.
+    """
     from fnmatch import fnmatch
 
+    relative = Path(_nfc(str(relative)))
     parts = relative.parts[:-1]  # directories only; the file is matched whole
     if parts and not recursive:
         return True
-    patterns = [pattern.rstrip("/") for pattern in (exclude or [])]
+    patterns = [_nfc(pattern.rstrip("/")) for pattern in (exclude or [])]
     return any(
         fnmatch(str(relative), pattern) or any(fnmatch(part, pattern) for part in parts)
         for pattern in patterns
@@ -529,6 +595,7 @@ def _refresh_zotero_metadata(
         and first.get("zotero_csv_sha256") == zotero["sha256"]
         and was_shared == shared_basename
     ):
+        stats["zotero_unchanged"] += 1
         return
     needs_text = not shared_basename and match_by_filename(pdf_path, zotero["filename"])[0] is None
     text = unicodedata.normalize("NFC", extract_pdf_text(pdf_path)) if needs_text else ""
@@ -632,6 +699,7 @@ def _missing_sources(
     *,
     exclude: list[str] | None = None,
     recursive: bool = True,
+    unchecked: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """(missing, root_unknown) among the stored sources.
 
@@ -639,8 +707,10 @@ def _missing_sources(
     under its exact recorded name (sources now excluded are listed by
     ``_excluded_sources`` instead). ``root_unknown``: sources stored before
     ``pdf_root`` was recorded; they may belong to any library, so they are
-    never attributed to this root or pruned.
+    never attributed to this root or pruned. A source whose folder cannot be
+    listed is not missing; it is added to ``unchecked``.
     """
+    unchecked = set() if unchecked is None else unchecked
     missing, root_unknown = [], []
     for relpath, info in sorted(_stored_pdf_sources(collection).items()):
         if info["pdf_root"] is None:
@@ -648,7 +718,7 @@ def _missing_sources(
         elif (
             info["pdf_root"] == pdf_root
             and not _is_excluded(Path(relpath), exclude, recursive=recursive)
-            and not _exists_exactly(pdf_dir, relpath)
+            and not _exists_or_unchecked(pdf_dir, relpath, unchecked)
         ):
             missing.append(relpath)
     return missing, root_unknown
@@ -676,14 +746,23 @@ def _handle_missing(
     *,
     exclude: list[str] | None = None,
     recursive: bool = True,
+    unchecked: set[str] | None = None,
 ) -> None:
+    unchecked = set() if unchecked is None else unchecked
     missing, root_unknown = _missing_sources(
-        collection, pdf_dir, pdf_root, exclude=exclude, recursive=recursive
+        collection, pdf_dir, pdf_root, exclude=exclude, recursive=recursive, unchecked=unchecked
     )
     excluded = _excluded_sources(collection, pdf_root, exclude, recursive)
     stats["pdfs_missing"] = len(missing)
     stats["pdfs_stored_excluded"] = len(excluded)
     stats["pdfs_root_unknown"] = len(root_unknown)
+    stats["pdfs_unchecked"] = len(unchecked)
+    if unchecked:
+        progress(
+            f"[warn] {len(unchecked)} stored source(s) are in folders that could not be "
+            "read (permission or I/O error); could not check; not pruned:\n"
+            + "\n".join(f"    {relpath}" for relpath in sorted(unchecked))
+        )
     if root_unknown:
         progress(
             f"[note] {len(root_unknown)} stored source(s) have no recorded PDF root "
@@ -769,7 +848,10 @@ def ingest_pdf_dir(
         "pdfs_duplicates_skipped": 0,
         "pdfs_renamed": 0,
         "pdfs_root_unknown": 0,
+        "pdfs_root_adopted": 0,
+        "pdfs_unchecked": 0,
         "zotero_kept": 0,
+        "zotero_unchanged": 0,
     }
     pdf_paths, n_excluded = select_pdfs(pdf_dir, recursive=recursive, exclude=exclude)
     stats["pdfs_excluded"] = n_excluded
@@ -797,6 +879,7 @@ def ingest_pdf_dir(
         key for key, n in Counter(normalize_key(p.name) for p in pdf_paths).items() if key and n > 1
     }
     unreadable: list[str] = []
+    unchecked: set[str] = set()  # stored relpaths whose folder could not be listed
     with _ingest_lock(config, progress):
         collection = get_collection(config, create=True)
         chunk_size, chunk_overlap = _chunk_settings(config)
@@ -836,6 +919,15 @@ def ingest_pdf_dir(
                 "chunk_overlap_words": chunk_overlap,
                 "sentence_segmenter": SENTENCE_SEGMENTER,
             }
+            stored = stored_sources.get(rel_name)
+            if (
+                stored
+                and stored["pdf_root"] is None
+                and stored["source_file_sha256"] == source_sha256
+            ):
+                _adopt_root(collection, rel_name, pdf_root, progress)
+                stored["pdf_root"] = pdf_root
+                stats["pdfs_root_adopted"] += 1
             state, reason = _ingest_state(collection, rel_name, current)
             if state == "stale":
                 stats["pdfs_stale"] += 1
@@ -864,15 +956,19 @@ def ingest_pdf_dir(
             copies = _same_file_elsewhere(stored_sources, rel_name, source_sha256, alternates)
             # A stored digest can describe an earlier version of a live file.
             # That old version must not suppress a new source containing those bytes.
+            # A copy without a recorded root is looked for under this root:
+            # gone from here, it is this file renamed (an older store's source).
             copies = [
                 (name, root)
                 for name, root in copies
-                if _copy_still_matches(root, name, source_sha256)
+                if _copy_still_matches(
+                    Path(root) if root else pdf_dir, name, source_sha256, unchecked
+                )
             ]
             present = [
                 (relpath, root)
                 for relpath, root in copies
-                if (root is None or _exists_exactly(Path(root), relpath))
+                if _exists_or_unchecked(Path(root) if root else pdf_dir, relpath, unchecked)
                 and not (
                     prune_missing
                     and root == pdf_root
@@ -932,7 +1028,7 @@ def ingest_pdf_dir(
                 continue
 
             base_meta = {
-                "pdf_filename": pdf_path.name,
+                "pdf_filename": _nfc(pdf_path.name),
                 "pdf_relpath": rel_name,
                 "pdf_root": pdf_root,
                 "chunk_size_words": chunk_size,
@@ -986,6 +1082,7 @@ def ingest_pdf_dir(
             progress,
             exclude=exclude,
             recursive=recursive,
+            unchecked=unchecked,
         )
 
     progress(
@@ -1007,7 +1104,8 @@ def ingest_pdf_dir(
             f"[zotero] matched {stats['zotero_by_filename']} by filename, "
             f"{stats['zotero_by_doi']} by DOI, {stats['zotero_by_title']} by title; "
             f"{stats['zotero_unmatched']} unmatched, {stats['zotero_ambiguous']} of them "
-            "ambiguous (unmatched files keep the filesystem acquisition date only)"
+            f"ambiguous; {stats['zotero_unchanged']} unchanged since this export was last "
+            "applied (unmatched files keep the filesystem acquisition date only)"
         )
     return stats
 

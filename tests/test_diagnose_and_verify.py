@@ -204,7 +204,7 @@ PRIMARY = """## 1. Polysemy Map
 Semantic distance from other clusters: 4
 
 ### Cluster B: novelty-as-property
-distance 2
+Semantic distance from Cluster A: 2
 """
 
 SECONDARY = """## 1. Polysemy Map

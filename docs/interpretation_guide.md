@@ -69,13 +69,14 @@ family of reasonable partitions, not one number. When that is your
 situation, treat granularity as an interpretive choice and make it
 explicitly: pin `clustering.k`, or switch `clustering.method: hierarchical`
 and inspect the tree at several cuts — under the hierarchical method a
-coarser cut is always an exact merge of finer clusters, and `cda validate`
-lets you move the cutoff line on the dendrogram after inspecting the
-clusters. Findings that persist across nearby resolutions are robust;
-findings visible at only one resolution are fragile. Whatever resolution
-you settle on, the per-cluster evidence standard is unchanged: blind
-verdicts (`cda validate`) and stability under resampling, not the
-silhouette argmax.
+coarser cut is always an exact merge of finer clusters, and the GUI's
+Validate tab lets you move the cutoff line on the dendrogram after
+inspecting the clusters (the recut is GUI-only; `cda validate` creates and
+reopens sessions but does not move the cutoff). Findings that persist
+across nearby resolutions are robust; findings visible at only one
+resolution are fragile. Whatever resolution you settle on, the
+per-cluster evidence standard is unchanged: blind verdicts (`cda validate`)
+and stability under resampling, not the silhouette argmax.
 
 ## Reading the "Clustering Stability" section
 

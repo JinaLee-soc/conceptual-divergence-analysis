@@ -292,29 +292,55 @@ config = build_config(corpus_dir, drafts_dir, output_dir)
 def _demo_failure_message(exc: Exception, term: str) -> str:
     """Explain a demo failure in terms a visitor can act on.
 
-    The common failure on a hosted instance is a fixture miss (recognized by
-    its type, not its wording, so a reworded message cannot silently turn this
-    explanation back into an error dump), and its cause is not obvious: a fixture is keyed by a fingerprint over the prompt, the
-    prompt embeds the clustering, and spherical k-means can land differently
-    on x86_64 than on the arm64 the fixtures were recorded on (see
-    demo/fixtures/README.md). A visitor reading the raw fingerprint error has
-    no way to know that none of this is their fault.
+    The common failure off the maintainer's machine is a fixture miss
+    (recognized by its type, not its wording, so a reworded message cannot
+    silently turn this explanation back into an error dump). A fixture is
+    keyed by a fingerprint over the model name and the prompt, and the prompt
+    embeds the clustering, which can differ between CPU architectures and
+    library builds (see demo/fixtures/README.md). On the public demo the
+    technical detail is withheld: it names paths on the host's filesystem.
     """
     from cda.llm.base import FixtureMissError
 
-    text = str(exc)
     if not isinstance(exc, FixtureMissError):
-        return text
-    return (
-        f"The recorded response for **{term}** could not be replayed on this "
-        "server.\n\n"
+        if DEMO_MODE:
+            return f"The demo failed on this server ({type(exc).__name__})."
+        return str(exc)
+    cause = (
+        f"The recorded response for **{term}** could not be replayed here.\n\n"
         "Demo fixtures are keyed to the exact analysis prompt, and the "
         "clustering that prompt describes can differ between CPU "
-        "architectures — so a fixture recorded on one machine may not replay "
-        "on another. Nothing is wrong with your input.\n\n"
-        "Try the other term, or install the release and run it locally, where "
-        "the demo records its own fixtures on first use.\n\n"
-        f"Technical detail:\n\n```\n{text}\n```"
+        "architectures, so a fixture made on one machine may not replay on "
+        "another. Nothing is "
+        "wrong with your input.\n\n"
+    )
+    if DEMO_MODE:
+        return cause + "Try the other term, or install CDA and run the demo locally."
+    return (
+        cause + "Try the other term. With an API key, switch the mock toggle off and "
+        "run the demo once live (~$0.10–0.15): the response is recorded under "
+        "your configured model, and later free replays on this machine use that "
+        "recording before the committed one.\n\n"
+        f"Technical detail:\n\n```\n{exc}\n```"
+    )
+
+
+def _own_text_skip_message(result: dict, term: str) -> str:
+    """The notice for a paste the pipeline skipped.
+
+    The pipeline's own reason is written for a researcher with a corpus: it
+    names the host's drafts directory and suggests Zotero tags. On the public
+    demo the only researcher input is the pasted text, so the actionable
+    cause is that the paste does not use the term often enough.
+    """
+    if not DEMO_MODE:
+        return result.get("reason", str(result))
+    found = (result.get("stats") or {}).get("researcher_passages")
+    count = f" (passages found: {found})" if found is not None else ""
+    return (
+        f"Your pasted text does not contain the term *{term}* often enough to "
+        f"analyze{count}. Paste paragraphs that use *{term}*, or "
+        "pick the other term."
     )
 
 
@@ -409,12 +435,17 @@ def render_demo_button(mock_llm: bool, output_dir: str) -> None:
                         # Replay is forced on the public demo: this host has no
                         # key to spend.
                         mock=True if DEMO_MODE else mock_llm,
-                        # A live demo records its response as a replayable
-                        # fixture (same rule as the Analyze and Validate
-                        # tabs), so one paid run makes the mock replay work
-                        # on this machine even where the committed fixtures
-                        # do not (see _demo_failure_message).
+                        # A live demo records its response under the
+                        # configured model (same rule as the Analyze and
+                        # Validate tabs); mock replay prefers that recording
+                        # and falls back to the committed claude-code-session
+                        # fixture, so one paid run makes replay work on this
+                        # machine even where the committed fixture does not.
                         record_fixtures=live_demo,
+                        # A deliberate live rerun replaces this machine's
+                        # earlier recording, as on the Analyze tab; without
+                        # it the second paid click is refused.
+                        overwrite_fixtures=live_demo,
                         output_dir=demo_output_dir,
                         return_passages=True,
                     )
@@ -546,7 +577,11 @@ def render_own_text_panel(key_ok: bool) -> None:
                     box.update(label="Finished", state="complete")
                 except Exception as exc:
                     box.update(label="Failed", state="error")
-                    st.error(str(exc))
+                    # The public demo never prints exception text: it can
+                    # carry absolute paths on the host.
+                    st.error(
+                        f"The preview failed ({type(exc).__name__})." if DEMO_MODE else str(exc)
+                    )
                     result = None
             # Session state, not a local: the paid result must survive the
             # rerun that any later widget interaction (its own download button
@@ -572,7 +607,7 @@ def render_own_text_panel(key_ok: bool) -> None:
         elif result and result["status"] == "ok":
             _show_result_tabs(result, key_prefix="own_text_result")
         elif result:
-            st.warning(result.get("reason", str(result)))
+            st.warning(_own_text_skip_message(result, result.get("term", own_term)))
 
 
 def openalex_mailto_status() -> str:

@@ -39,29 +39,48 @@ def _thresholds(flags_config: dict) -> tuple[float, float, int]:
 
     On the pipeline path ``flag_params`` has already validated these, but the
     GUI, the benchmarks and tests call the two compute functions directly with
-    a plain dict — and a bare ``float(...)`` there fails with a message that
-    names no key, leaving the reader to guess which threshold was mistyped.
+    a plain dict — so the same rules apply here (shares: finite numbers in
+    [0, 1]; the passage count: a whole number >= 0; never a boolean), each
+    refusal naming its key.
     """
-    values: dict[str, float | int] = {}
-    for key, default, cast in (
-        ("researcher_share_threshold", 0.80, float),
-        ("literature_share_threshold", 0.10, float),
-        ("underrepresented_max_researcher_passages", 0, int),
-    ):
-        raw = flags_config.get(key, default)
-        try:
-            values[key] = cast(raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"flags.{key} must be a number, got {raw!r}. See config/config.example.yaml."
-            ) from exc
-    for key in ("researcher_share_threshold", "literature_share_threshold"):
-        _require_share(key, values[key])
     return (
-        float(values["researcher_share_threshold"]),
-        float(values["literature_share_threshold"]),
-        int(values["underrepresented_max_researcher_passages"]),
+        _share(flags_config, "researcher_share_threshold", 0.80),
+        _share(flags_config, "literature_share_threshold", 0.10),
+        _count(flags_config, "underrepresented_max_researcher_passages", 0),
     )
+
+
+def _share(flags_config: dict, key: str, default: float) -> float:
+    """A share threshold: a finite number in [0, 1], never a boolean."""
+    raw = flags_config.get(key, default)
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"flags.{key} must be a number, got {raw!r}. See config/config.example.yaml."
+        ) from exc
+    _require_share(key, value)
+    return value
+
+
+def _count(flags_config: dict, key: str, default: int) -> int:
+    """A passage-count threshold: a whole number >= 0, never a boolean or a fraction."""
+    raw = flags_config.get(key, default)
+    try:
+        if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+            # int() would silently truncate 0.5 to 0, and True is not a count.
+            raise ValueError
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"flags.{key} must be a whole number of passages, got {raw!r}. "
+            "See config/config.example.yaml."
+        ) from exc
+    if value < 0:
+        raise ValueError(f"flags.{key} must be >= 0, got {value}. See config/config.example.yaml.")
+    return value
 
 
 def _require_share(key: str, value: float) -> None:

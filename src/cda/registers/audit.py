@@ -37,9 +37,9 @@ _NEXT_SECTION = re.compile(r"^##\s", re.MULTILINE)
 # (never a hyphen inside a word such as "k-means" or "re-split"), and at a
 # contrastive connector. A colon in "1:1" and a decimal point are not clause
 # ends.
-_NEGATION = r"(?:\bno\b|\bnot\b|\bwithout\b|\bneither\b|n't)"
+_NEGATION = r"(?:\bno\b|\bnot\b|\bcannot\b|\bnever\b|\bnone\b|\bwithout\b|\bneither\b|n't)"
 _CLAUSE_BOUNDARY = re.compile(
-    r"[;)–—]|\.(?!\d)|(?<!\d):(?!\d)|\s--?\s"
+    r"[;)–—?]|\.(?!\d)|(?<!\d):(?!\d)|\s--?\s"
     r"|\b(?:but|however|whereas|while|although|though)\b"
 )
 # Commas inside a negated list keep the negation ("not merged, split, or
@@ -47,8 +47,20 @@ _CLAUSE_BOUNDARY = re.compile(
 # a new clause ("without merging, cluster 2 is split").
 _LIST_CONTINUATION = re.compile(r"\s*(?:(?:or|nor|and)\s+)?")
 _LIST_ITEM = re.compile(r"\s*(?:(?:or|nor|and)\s+)?[\w-]+\s*")
-# "merges: none", "splits: 0" state the count as zero.
-_ZERO_COUNT = re.compile(r"\w*\s*:\s*(?:none|no|n/a|0(?![\d./]))\b")
+# "merges: none", "splits: 0", "merge count 0" and "Split? No." state the
+# count as zero. A bare "merges 0 and 1" names clusters, so a colon, "=", "?"
+# or the word "count" must come before the zero.
+_ZERO_COUNT = re.compile(r"\w*(?:\s+count\b\s*[:=]?|\s*[:=?])\s*(?:none|no|n/a|0(?![\d./]))\b")
+# A negation after the word within its clause: "a split of Cluster 2 is not
+# observed", "... does not occur", "... was never found".
+_POST_NEGATION = re.compile(
+    r"(?:\bnot|\bnever|n't)\s+(?:been\s+|be\s+)?"
+    r"(?:observed|occur\w*|found|seen|present|detected|evident|apparent)\b"
+)
+# A negation reaches across commas only to items of the same negated list, so
+# the word itself must continue that list ("not merged, split, or reassigned");
+# "Cluster 3 is not split, merged with Cluster 4" declares a merge.
+_LIST_CONTINUES = re.compile(r"\w*\s*(?:,|\b(?:or|nor|and)\b|$)")
 
 # A per-register mapping declaration is a markdown bullet whose *bolded label*
 # names the mapping, e.g. "- **k-means/LLM mapping:** merges clusters 1 and 2".
@@ -131,26 +143,35 @@ def _classify_mapping_line(line: str) -> str | None:
 
 def _has_affirmative(low: str, stem: str) -> bool:
     """True when some occurrence of ``stem`` is not negated within its clause."""
-    boundary_ends = [m.end() for m in _CLAUSE_BOUNDARY.finditer(low)]
+    boundaries = list(_CLAUSE_BOUNDARY.finditer(low))
     for occurrence in re.finditer(rf"\b{stem}", low):
         if _ZERO_COUNT.match(low, occurrence.end()):
             continue
-        clause_start = max((end for end in boundary_ends if end <= occurrence.start()), default=0)
-        if not _is_negated(low[clause_start : occurrence.start()]):
+        start = max((b.end() for b in boundaries if b.end() <= occurrence.start()), default=0)
+        end = min(
+            (b.start() for b in boundaries if b.start() >= occurrence.end()), default=len(low)
+        )
+        suffix = low[occurrence.end() : end]
+        if _POST_NEGATION.search(suffix.split(",")[0]):
+            continue
+        if not _is_negated(low[start : occurrence.start()], suffix):
             return True
     return False
 
 
-def _is_negated(clause_prefix: str) -> bool:
+def _is_negated(clause_prefix: str, clause_suffix: str = "") -> bool:
     """Whether the clause text before a merge/split word negates it.
 
     The negation must sit in the word's own comma segment, or in an earlier
-    segment linked to it only by bare list items ("not merged, split, or ...").
+    segment linked to it only by bare list items ("not merged, split, or ...")
+    while the word itself still belongs to that list.
     """
     *earlier, current = clause_prefix.split(",")
     if re.search(_NEGATION, current):
         return True
     if not _LIST_CONTINUATION.fullmatch(current):
+        return False
+    if not re.search(r"\b(?:or|nor|and)\b", current) and not _LIST_CONTINUES.match(clause_suffix):
         return False
     for segment in reversed(earlier):
         if re.search(_NEGATION, segment):
@@ -189,14 +210,40 @@ def _parse_clusters(cell: str) -> tuple[list[int], list[str]]:
     return sorted(clusters), reversed_ranges
 
 
-def _find_absorbed_column(lines: list[str]) -> tuple[int, int] | None:
+def _table_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _best_column(cells: list[str], ranked_rules) -> int | None:
+    """Index of the first cell matching the highest-ranked rule, or None."""
+    for rule in ranked_rules:
+        for j, cell in enumerate(cells):
+            if rule(cell.lower()):
+                return j
+    return None
+
+
+# An "absorbed clusters" header beats a "closest k-means cluster" header that
+# names only the nearest cluster.
+_ABSORBED_RULES = (
+    lambda cell: "absorb" in cell,
+    lambda cell: "cluster" in cell and ("k-means" in cell or "closest" in cell),
+)
+_REGISTER_RULES = (
+    lambda cell: "register" in cell and "literature" in cell,
+    lambda cell: "register" in cell and "cluster" not in cell,
+)
+
+
+def _find_absorbed_column(lines: list[str]) -> tuple[int, int, int | None] | None:
+    """(header line, absorbed-clusters column, register column or None)."""
     for i, line in enumerate(lines):
         if not line.lstrip().startswith("|"):
             continue
-        cells = [c.strip().lower() for c in line.strip().strip("|").split("|")]
-        for j, cell in enumerate(cells):
-            if "cluster" in cell and ("absorb" in cell or "k-means" in cell):
-                return i, j
+        cells = _table_cells(line)
+        absorbed = _best_column(cells, _ABSORBED_RULES)
+        if absorbed is not None:
+            return i, absorbed, _best_column(cells, _REGISTER_RULES)
     return None
 
 
@@ -212,17 +259,24 @@ def _literature_table_counts(section: str) -> tuple[dict[str, int] | None, list[
     located = _find_absorbed_column(lines)
     if located is None:
         return None, []
-    header_idx, absorbed_col = located
+    header_idx, absorbed_col, register_col = located
 
     notes: list[str] = []
+    if register_col is None:
+        notes.append(
+            "Register table has no column headed 'register'; rows are keyed by their "
+            "first column, which may not name the literature register."
+        )
+        register_col = 0
     register_clusters: dict[str, list[int]] = {}
     for line in lines[header_idx + 1 :]:
         if not line.lstrip().startswith("|"):
             break
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if re.fullmatch(r"[-:\s]*", cells[0]):
+        cells = _table_cells(line)
+        if all(re.fullmatch(r"[-:\s]*", cell) for cell in cells):
             continue  # separator row
-        register = re.sub(r"[*`]", "", cells[0]).strip()
+        key = cells[register_col] if len(cells) > register_col else ""
+        register = re.sub(r"[*`]", "", key).strip()
         cell = cells[absorbed_col] if len(cells) > absorbed_col else ""
         clusters, reversed_ranges = _parse_clusters(cell)
         if reversed_ranges:

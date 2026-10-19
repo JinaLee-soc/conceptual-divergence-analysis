@@ -39,7 +39,8 @@ jobs:
       fail-fast: false
       matrix:
         # 3.11 is where the dependency pins were resolved and tested.
-        python-version: ["3.11", "3.12"]
+        # 3.13 is tested because the README and badge claim support for it.
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

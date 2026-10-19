@@ -11,7 +11,9 @@ complete run.
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -97,11 +99,40 @@ def replace_atomic(temporary: str | Path, path: Path) -> None:
     os.replace(temporary, path)  # atomic within a filesystem
 
 
+# os.link fails with these on filesystems without hard links (FAT/exFAT,
+# some network and FUSE mounts, Docker Desktop bind mounts).
+_NO_HARD_LINKS = frozenset(
+    {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
+)
+
+
+def _copy_to_new_file(temporary: str | Path, path: Path) -> None:
+    """Create ``path`` exclusively and copy the temp file into it.
+
+    Not atomic for readers, but still create-only; a failed copy removes the
+    partial file it created.
+    """
+    handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, _NEW_FILE_MODE)
+    try:
+        with os.fdopen(handle, "wb") as target, open(temporary, "rb") as source:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+    except BaseException:
+        os.unlink(path)
+        raise
+
+
 def install_new(temporary: str | Path, path: Path) -> None:
     """Install a fully-written temp file as ``path``; refuse if ``path`` exists."""
     _fsync(str(temporary))
     try:
-        os.link(temporary, path)
+        try:
+            os.link(temporary, path)
+        except OSError as exc:
+            if isinstance(exc, FileExistsError) or exc.errno not in _NO_HARD_LINKS:
+                raise
+            _copy_to_new_file(temporary, path)
     except FileExistsError:
         raise FileExistsError(f"Refusing to overwrite existing artifact: {path}") from None
 

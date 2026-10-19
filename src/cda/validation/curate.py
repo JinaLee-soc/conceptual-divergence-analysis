@@ -33,7 +33,12 @@ from cda.clustering.hierarchy import cut_tree_at_k, linkage_matrix
 from cda.clustering.spherical import normalize_rows
 from cda.config import Config
 from cda.validation.metrics import blind_verdicts
-from cda.validation.session import current_revision, partition_for, save_session
+from cda.validation.session import (
+    current_revision,
+    partition_for,
+    save_session,
+    withdraw_endorsement,
+)
 
 
 def _embedding_matrix(texts: list[str], embedder, names: list[str]) -> np.ndarray:
@@ -148,6 +153,20 @@ def rebuild_partition_clusters(
             }
         )
     return clusters, silhouettes
+
+
+def _withdraw_endorsement_after(
+    session: dict, edit: dict, now: datetime, progress: Callable[[str], None]
+) -> None:
+    """An applied edit changes the structure an endorsement vouched for."""
+    withdrawal = withdraw_endorsement(session, edit_id=edit["edit_id"], now=now)
+    if withdrawal:
+        progress(
+            f"[validate] endorsement from {withdrawal['at']} withdrawn: edit "
+            f"{edit['edit_id']} moved the structure to revision(s) "
+            f"{withdrawal['withdrawn_at_revisions']}; judge the changed clusters "
+            "and endorse again"
+        )
 
 
 def apply_recut(
@@ -299,6 +318,7 @@ def apply_recut(
                 session["verdicts"].append(carried)
 
     session["edits"].append(edit)
+    _withdraw_endorsement_after(session, edit, now, progress)
     progress(
         f"[validate] recut at k={k}: {len(kept)} cluster(s) unchanged (verdicts "
         f"kept), {k - len(kept)} new cluster(s) need verdicts"
@@ -459,6 +479,7 @@ def apply_pending_edit(
             carried["revision"] = new_revision
             carried["carried_from_revision"] = revision
             session["verdicts"].append(carried)
+    _withdraw_endorsement_after(session, edit, now, progress)
 
     progress(
         f"[validate] applied {edit['kind']} on {side}: revision {new_revision}, "

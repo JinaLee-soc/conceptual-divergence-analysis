@@ -36,12 +36,20 @@ from cda.divergence.report import END_OF_LLM_BODY
 from cda.extraction.windows import safe_term_slug
 from cda.llm.base import FixtureMissError, LLMError
 from cda.llm.mock import MockProvider, require_recorded_fixtures
-from cda.llm.providers import fixture_model, resolve_model_spec, spec_model
+from cda.llm.providers import fixture_model, llm_temperature, resolve_model_spec, spec_model
 from cda.outputs import unique_run_basename, write_text_atomic
 from cda.registers.prompt_loader import load_system_prompt
 
 _REGISTER_HEADING = re.compile(r"^###\s+Cluster\s+\S+?:?\s*(.+)$", re.MULTILINE)
-_DISTANCE_MENTION = re.compile(r"[Dd]istance[^\n]*?\b([1-5])\b")
+# A rating is a 1-5 that follows a label and a colon or equals sign ("B: 2",
+# "Cluster 2: 4", "**Distance:** 3") or the word "rated"; the label's own digits
+# ("Cluster 2") are never ratings. Lines defining the scale ("1 = ...") are skipped.
+_DISTANCE_LINE = re.compile(r"distance", re.IGNORECASE)
+_SCALE_DEFINITION = re.compile(r"\b[1-5]\s*=\s*[^\W\d_]")
+_RATING = re.compile(
+    r"(?:(?<=[\w)*])\s*\**\s*[:=]|\brated(?:\s+(?:as|at))?)\s*\**\s*(?P<rating>[1-5])(?![\d%]|\.\d)",
+    re.IGNORECASE,
+)
 _HEADER_MODEL = re.compile(r"^<!-- generated: [^|]*\| model: (?P<model>[^|]+?) \|", re.MULTILINE)
 _LEGACY_COMPUTED_HEADING = "\n## Clustering Stability (computed)\n"
 
@@ -131,11 +139,18 @@ def primary_model_label(report_text: str) -> str:
     return match.group("model")
 
 
+def _distance_ratings(line: str) -> list[int]:
+    """Every rating stated on a line that mentions distance, in order."""
+    if not _DISTANCE_LINE.search(line) or _SCALE_DEFINITION.search(line):
+        return []
+    return [int(m.group("rating")) for m in _RATING.finditer(line)]
+
+
 def extract_register_structure(report_text: str) -> dict:
     """The comparable skeleton of a report: labels + distance mentions."""
     body = _comparable_body(report_text)
     labels = [label.strip().rstrip("*").strip() for label in _REGISTER_HEADING.findall(body)]
-    ratings = [int(r) for r in _DISTANCE_MENTION.findall(body)]
+    ratings = [rating for line in body.splitlines() for rating in _distance_ratings(line)]
     return {"researcher_register_labels": labels, "distance_ratings": ratings}
 
 
@@ -236,6 +251,8 @@ def run_verify(
             "e.g. claude-haiku-4-5-20251001 or openai:<model>. This hook is "
             "experimental — see docs/interpretation_guide.md."
         )
+    max_tokens = config.get_int("llm.max_tokens", minimum=1)
+    temperature = llm_temperature(config, spec)
 
     if mock:
         if fixtures_dir is None:
@@ -294,8 +311,8 @@ def run_verify(
         secondary_report = provider.complete(
             system=system_prompt,
             user=user_prompt,
-            max_tokens=config.get_int("llm.max_tokens", minimum=1),
-            temperature=config.get_float("llm.temperature", minimum=0.0),
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
     except FixtureMissError as exc:
         # The generic miss advice ("run cda demo --mock-llm") is wrong here:

@@ -31,11 +31,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from cda.config import ConfigError
 from cda.corpus.zotero import normalize_date_added
 from cda.types import Passage
 
 _HAS_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 _HAS_SECONDS = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
+_ONE_DIGIT_HOUR = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T])(\d:)")
+# An ISO date followed by AM/PM or a zone abbreviation (EST, PST): an ISO
+# reading would ignore either and silently shift the bound.
+_AMPM_OR_ZONE_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}\b.*[\d\s]([AaPp]\.?[Mm]\.?|[A-Za-z]{2,5})$")
 
 # Two acquisition clocks can exist in chunk metadata, both stored in UTC;
 # ``timeframe.date_source`` picks one and every report names it. They answer
@@ -56,9 +61,17 @@ def parse_bound(value: str, *, end_of_day: bool) -> str:
     padded to 23:59:59 so ``--added-to 2026-05-01`` includes that whole day,
     and an upper bound to the minute is padded to its 59th second.
     Unparseable or impossible dates raise: a silently dropped filter would
-    report a snapshot that was never taken.
+    report a snapshot that was never taken. A one-digit hour ("9:30") is read
+    as "09:30"; AM/PM and zone abbreviations raise ``ConfigError`` rather than
+    being ignored.
     """
-    raw = str(value).strip()
+    raw = _ONE_DIGIT_HOUR.sub(r"\g<1>0\2", str(value).strip())
+    if _AMPM_OR_ZONE_NAME.match(raw):
+        raise ConfigError(
+            f"Could not read '{value}' as a date bound: AM/PM and time-zone names "
+            "(EST, PST, …) are not supported. Use a 24-hour clock and a numeric "
+            "offset, e.g. '2026-05-01 21:30' (UTC) or '2026-05-01 21:30 -05:00'."
+        )
     try:
         normalized = normalize_date_added(raw)
     except ValueError as exc:

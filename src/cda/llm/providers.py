@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
-from cda.config import Config
+from cda.config import Config, ConfigError
 from cda.llm.base import LLMError, TruncatedReplyError
 
 
@@ -242,6 +243,24 @@ def fixture_model(spec: str) -> str:
     return model if ":" not in spec or spec.startswith("anthropic:") else spec
 
 
+def max_temperature(spec: str) -> float:
+    """The largest temperature the spec's API accepts: 2 for OpenAI, 1 for Anthropic."""
+    spec_model(spec)  # refuses unknown provider prefixes
+    return 2.0 if spec.strip().startswith("openai:") else 1.0
+
+
+def llm_temperature(config: Config, spec: str) -> float:
+    """``llm.temperature``, checked against the range the model's API accepts."""
+    maximum = max_temperature(spec)
+    temperature = config.get_float("llm.temperature", minimum=0.0)
+    if temperature > maximum:
+        raise ConfigError(
+            f"llm.temperature must be between 0 and {maximum:g} for '{spec}' "
+            f"(the API refuses larger values), got {temperature:g}."
+        )
+    return temperature
+
+
 def resolve_model_spec(spec: str) -> AnthropicProvider | OpenAICompatibleProvider:
     """Turn 'model' or 'provider:model' into a provider instance.
 
@@ -258,7 +277,13 @@ def resolve_model_spec(spec: str) -> AnthropicProvider | OpenAICompatibleProvide
     return AnthropicProvider(model=model)
 
 
-def get_provider(config: Config, *, mock: bool, fixtures_dir: str | Path | None = None):
+def get_provider(
+    config: Config,
+    *,
+    mock: bool,
+    fixtures_dir: str | Path | None = None,
+    fallback_fixture_models: Sequence[str] = (),
+):
     """Build the analysis provider for a run.
 
     ``mock=True`` returns the fixture-replay provider (no network); otherwise
@@ -271,6 +296,9 @@ def get_provider(config: Config, *, mock: bool, fixtures_dir: str | Path | None 
     The model name is part of the fixture fingerprint, so fixtures recorded
     under one model replay only under that same model. That is deliberate: a
     report must never be replayed as if a different model had written it.
+    ``fallback_fixture_models`` (mock only) are further model specs whose
+    fixtures replay, in order, when none was recorded under ``llm.model``;
+    the provider then reports the model it actually replayed.
     """
     model = str(config.get("llm.model"))
     if mock:
@@ -286,5 +314,6 @@ def get_provider(config: Config, *, mock: bool, fixtures_dir: str | Path | None 
             fixtures_dir=Path(fixtures_dir),
             model=spec_model(model),
             fingerprint_model=fixture_model(model),
+            fallbacks=[(spec_model(spec), fixture_model(spec)) for spec in fallback_fixture_models],
         )
     return resolve_model_spec(model)

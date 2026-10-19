@@ -370,12 +370,54 @@ def endorse(session: dict, *, note: str = "", now: datetime) -> dict:
                 "have no verdict yet"
             )
     session["endorsement"] = {
-        "revisions": {
-            side: current_revision(session, side)
-            for side in ("researcher", "literature")
-            if any(p["side"] == side for p in session["partitions"])
-        },
+        "revisions": current_revisions(session),
         "note": note,
         "at": now.isoformat(timespec="seconds"),
     }
     return session["endorsement"]
+
+
+def current_revisions(session: dict) -> dict[str, int]:
+    """The latest partition revision of every side the session holds."""
+    return {
+        side: current_revision(session, side)
+        for side in ("researcher", "literature")
+        if any(p["side"] == side for p in session["partitions"])
+    }
+
+
+def withdraw_endorsement(session: dict, *, edit_id: int, now: datetime) -> dict | None:
+    """Retract the endorsement after an edit changed the endorsed structure.
+
+    Call AFTER the edit's new partition revision is appended. An endorsement
+    asserts that the researcher judged the structure at specific revisions;
+    once an applied merge, split, or recut moves a side past those revisions,
+    the endorsement no longer describes the current clustering. The retracted
+    record is kept in ``endorsement_withdrawals`` (the audit trail), never
+    deleted. Returns the withdrawal entry, or None when nothing was endorsed.
+    """
+    endorsement = session.get("endorsement")
+    if not endorsement:
+        return None
+    withdrawal = {
+        **endorsement,
+        "withdrawn_by_edit": edit_id,
+        "withdrawn_at_revisions": current_revisions(session),
+        "withdrawn_at": now.isoformat(timespec="seconds"),
+    }
+    session.setdefault("endorsement_withdrawals", []).append(withdrawal)
+    session["endorsement"] = None
+    return withdrawal
+
+
+def current_endorsement(session: dict) -> dict | None:
+    """The endorsement, only if it still covers the current revisions.
+
+    Sessions recorded before edits withdrew endorsements can hold one whose
+    revisions an applied edit has since moved past; such a record must not
+    read as an endorsement of the structure now on screen.
+    """
+    endorsement = session.get("endorsement")
+    if endorsement and endorsement.get("revisions") == current_revisions(session):
+        return endorsement
+    return None

@@ -34,8 +34,9 @@ from cda.outputs import create_temp, install_new
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from cda.types import JointClustering, Passage
 
-# Colour-blind-safe qualitative palette (Okabe-Ito, extended by repetition of
-# shape rather than by inventing low-contrast hues). Joint mode only.
+# Joint-mode palette: Okabe-Ito first, then Tol and matplotlib tab20/tab20b
+# hues, with no grey (grey marks unassigned passages). 21 distinct colours
+# cover joint_max_k (15); only a larger configured k repeats colours.
 PALETTE = [
     "#0072b2",
     "#d55e00",
@@ -44,11 +45,20 @@ PALETTE = [
     "#e69f00",
     "#56b4e9",
     "#8c564b",
-    "#7f7f7f",
+    "#9467bd",
     "#117733",
     "#882255",
     "#44aa99",
     "#999933",
+    "#ffbb78",
+    "#98df8a",
+    "#d62728",
+    "#f7b6d2",
+    "#17becf",
+    "#9edae5",
+    "#393b79",
+    "#637939",
+    "#d6616b",
 ]
 UNASSIGNED_COLOUR = "#bbbbbb"
 _UNASSIGNED = "Cluster N/A"
@@ -73,15 +83,46 @@ def _cluster_index(passage: Passage) -> int | None:
     return int(match.group(1))
 
 
+LITERATURE_ALPHA = 0.40
+
+
+def _is_grey_or_pale_yellow(rgb) -> bool:
+    """Greys read as unassigned; a bright yellow star vanishes on white."""
+    red, green, blue = rgb
+    return max(rgb) - min(rgb) < 0.1 or (red > 0.9 and green > 0.8 and blue < 0.5)
+
+
+def _researcher_extension(base: list[str], literature: list[str]) -> list[str]:
+    """Colours from Brewer's Set1/Set2 and tab10/tab20b that stay apart from ``base``
+    and from every literature colour as drawn (translucent over white)."""
+    from matplotlib import colormaps
+    from matplotlib.colors import to_hex, to_rgb
+
+    drawn = [LITERATURE_ALPHA * np.array(to_rgb(c)) + (1 - LITERATURE_ALPHA) for c in literature]
+    chosen = list(base)
+    for name in ("Set1", "tab10", "Set2", "tab20b"):
+        for colour in colormaps[name].colors:
+            rgb = np.array(colour[:3])
+            if _is_grey_or_pale_yellow(rgb):
+                continue
+            if min(np.linalg.norm(rgb - np.array(to_rgb(c))) for c in chosen) < 0.25:
+                continue
+            if min(np.linalg.norm(rgb - lit) for lit in drawn) <= 0.25:
+                continue
+            chosen.append(to_hex(colour))
+    return chosen[len(base) :]
+
+
 def _independent_palettes() -> tuple[list[str], list[str]]:
     """(literature, researcher) palettes for independent mode, from matplotlib's maps.
 
     The partitions are unrelated, so the corpora must never share a colour.
     Literature takes tab20's 18 non-grey entries (grey marks unassigned
     passages), its darker shade of every hue first, which covers
-    literature_max_k (15). Researcher stars take Brewer's Dark2, whose 8 colours
-    cover researcher_max_k (8) and stay far from tab20's hues as the
-    literature dots are drawn (40% opacity).
+    literature_max_k (15). Researcher stars take Brewer's Dark2 (researcher_max_k
+    is 8), then further hues that stay far from tab20's as the literature dots
+    are drawn, so a fixed clustering.k up to literature_max_k keeps distinct
+    researcher colours too.
     """
     from matplotlib import colormaps
     from matplotlib.colors import to_hex
@@ -90,7 +131,7 @@ def _independent_palettes() -> tuple[list[str], list[str]]:
     hues = [tab20[i : i + 2] for i in range(0, len(tab20), 2) if tab20[i] != "#7f7f7f"]
     literature = [dark for dark, _ in hues] + [light for _, light in hues]
     researcher = [to_hex(colour) for colour in colormaps["Dark2"].colors]
-    return literature, researcher
+    return literature, researcher + _researcher_extension(researcher, literature)
 
 
 def _colours(passages: list[Passage], palette: list[str]) -> list[str]:
@@ -200,7 +241,7 @@ def draw_passage_map(
             xy[:, 1],
             s=7,
             c=_colours(literature, literature_palette),
-            alpha=0.40,
+            alpha=LITERATURE_ALPHA,
             linewidths=0.0,
             zorder=2,
         )

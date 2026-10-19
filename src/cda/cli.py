@@ -197,10 +197,24 @@ def _demo_or_user_config(args: argparse.Namespace):
     return _config_from_args(args)
 
 
+def _ingest_demo_corpus(config):
+    """Self-heal like `cda demo`: index the toy corpus so a fresh clone can
+    run any --demo command directly. Returns (demo_dir, embedder)."""
+    from cda.corpus.embeddings import get_embedder
+    from cda.demo import ensure_toy_corpus_ingested, find_demo_dir
+
+    demo_dir = find_demo_dir()
+    embedder = get_embedder(config)
+    ensure_toy_corpus_ingested(config, demo_dir, embedder)
+    return demo_dir, embedder
+
+
 def _cmd_diagnose(args: argparse.Namespace) -> int:
     from cda.diagnose.report import run_diagnose
 
     config = _demo_or_user_config(args)
+    if getattr(args, "demo", False):
+        _ingest_demo_corpus(config)
     fields = [name.strip() for name in (args.fields or "").split(",") if name.strip()]
     if not fields:
         # get_list wraps a bare string — `declared_fields: Social Sciences`
@@ -241,12 +255,7 @@ def _cmd_emergence(args: argparse.Namespace) -> int:
     config = _demo_or_user_config(args)
     embedder = None
     if getattr(args, "demo", False):
-        # Self-heal like `cda demo`: a fresh clone can run emergence directly.
-        from cda.corpus.embeddings import get_embedder
-        from cda.demo import ensure_toy_corpus_ingested, find_demo_dir
-
-        embedder = get_embedder(config)
-        ensure_toy_corpus_ingested(config, find_demo_dir(), embedder)
+        _demo_dir, embedder = _ingest_demo_corpus(config)
     result = run_emergence(args.term, config, embedder=embedder)
     if result["status"] == "skipped":
         print(f"[emergence] skipped: {result['emergence']['reason']}", file=sys.stderr)
@@ -306,13 +315,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     embedder = None
     fixtures_dir = args.fixtures_dir
     if getattr(args, "demo", False):
-        # Self-heal like `cda demo`: a fresh clone can start validating directly.
-        from cda.corpus.embeddings import get_embedder
-        from cda.demo import ensure_toy_corpus_ingested, find_demo_dir
-
-        demo_dir = find_demo_dir()
-        embedder = get_embedder(config)
-        ensure_toy_corpus_ingested(config, demo_dir, embedder)
+        demo_dir, embedder = _ingest_demo_corpus(config)
         if fixtures_dir is None:
             fixtures_dir = demo_dir / "fixtures" / "validation"
 

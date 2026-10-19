@@ -10,6 +10,7 @@ than an error.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,23 +62,54 @@ class MockProvider:
 
     name = "mock"
 
-    def __init__(self, fixtures_dir: Path, model: str, *, fingerprint_model: str | None = None):
+    def __init__(
+        self,
+        fixtures_dir: Path,
+        model: str,
+        *,
+        fingerprint_model: str | None = None,
+        fallbacks: Sequence[tuple[str, str]] = (),
+    ):
         """``fingerprint_model`` is the provider-qualified key (see
-        ``providers.fixture_model``); it equals ``model`` for Anthropic specs."""
+        ``providers.fixture_model``); it equals ``model`` for Anthropic specs.
+
+        ``fallbacks`` are further (model, fingerprint_model) pairs tried in
+        order when nothing was recorded under ``model``. After a replay,
+        ``model`` names the model whose fixture was replayed, so the report
+        header never credits a reply to a model that did not write it.
+        """
         self.model = model
         self.fingerprint_model = fingerprint_model or model
+        self._candidates = [(self.model, self.fingerprint_model)] + [
+            pair for pair in fallbacks if pair[1] != self.fingerprint_model
+        ]
         self._dir = Path(fixtures_dir)
 
+    def _locate(self, system: str, user: str) -> tuple[str, str, Path] | None:
+        """(model, fingerprint model, path) of the first recorded candidate."""
+        for model, fingerprint_model in self._candidates:
+            path = self._dir / f"{prompt_fingerprint(fingerprint_model, system, user)}.json"
+            if path.is_file():
+                return model, fingerprint_model, path
+        return None
+
     def complete(self, *, system: str, user: str, max_tokens: int, temperature: float) -> str:
-        key = prompt_fingerprint(self.fingerprint_model, system, user)
-        path = self._dir / f"{key}.json"
-        if not path.is_file():
+        located = self._locate(system, user)
+        if located is None:
+            key = prompt_fingerprint(self.fingerprint_model, system, user)
+            path = self._dir / f"{key}.json"
+            fallback_note = "".join(
+                f"  also tried : {self._dir / (prompt_fingerprint(fp, system, user) + '.json')}"
+                f" (model {model})\n"
+                for model, fp in self._candidates[1:]
+            )
             available = (
                 sorted(p.stem for p in self._dir.glob("*.json")) if self._dir.is_dir() else []
             )
             raise FixtureMissError(
                 "Mock fixture not found for this prompt.\n"
                 f"  looked for : {path}\n"
+                f"{fallback_note}"
                 f"  fingerprint: {key} (sha256 of model + system + user prompt)\n"
                 f"  available  : {', '.join(available) if available else '(none)'}\n"
                 "Why this happens: the assembled prompt differs from the one the\n"
@@ -89,6 +121,13 @@ class MockProvider:
                 "    drop --mock-llm), optionally adding --record-fixtures to\n"
                 "    save a fixture for future offline replay."
             )
+        model, fingerprint_model, path = located
+        if fingerprint_model != self.fingerprint_model:
+            print(
+                f"[fixture] nothing recorded under {self.model} for this prompt; "
+                f"replaying the {model} fixture {path.name}"
+            )
+        self.model, self.fingerprint_model = model, fingerprint_model
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and data.get("truncated"):

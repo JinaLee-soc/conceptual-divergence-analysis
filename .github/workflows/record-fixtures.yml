@@ -3,6 +3,8 @@ name: record-fixtures
 # Optional live demo recording on Linux. Requires the ANTHROPIC_API_KEY
 # repository secret and costs approximately $0.10–0.15 per term. The workflow
 # uploads the resulting fixtures and commits changes to the selected branch.
+# The recording is keyed by the configured llm.model, so it is a new file
+# beside the committed claude-code-session fixtures; a mock demo prefers it.
 # Regular CI replays the committed authored fixtures for both demo terms.
 
 on:
@@ -53,10 +55,29 @@ jobs:
           fi
           cda demo --term "$TERM_INPUT" --record-fixtures
 
-      - name: Prove the recorded fixture replays offline (no key, no network)
+      - name: Prove the NEW recording replays offline (no key, no network)
+        # A plain mock run would also pass by falling back to the committed
+        # claude-code-session fixture, so the report header must name the
+        # configured model: only the new recording can produce that.
         env:
           HF_HUB_OFFLINE: "1"
-        run: cda demo --term "$TERM_INPUT" --mock-llm
+          ANTHROPIC_API_KEY: ""
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from cda.demo import demo_config, find_demo_dir, run_demo
+
+          model = str(demo_config(find_demo_dir()).get("llm.model"))
+          result = run_demo(term=os.environ["TERM_INPUT"], mock=True)
+          assert result["status"] == "ok", result
+          header = Path(result["report_file"]).read_text(encoding="utf-8").splitlines()[0]
+          assert f"| model: {model} |" in header, (
+              f"mock replay did not use the new {model} recording: {header}"
+          )
+          print(f"replayed the new {model} recording: {header}")
+          PY
 
       - name: Upload the fixture as a build artifact (manual-commit fallback)
         uses: actions/upload-artifact@v4
@@ -66,12 +87,14 @@ jobs:
 
       - name: Commit the new fixture to the branch you ran from
         run: |
-          if git diff --quiet -- demo/fixtures; then
-            echo "No fixture change: this platform's fingerprint already ships."
+          # Stage first: a new recording is an untracked file, which
+          # `git diff` without --cached would never report.
+          git add demo/fixtures
+          if git diff --cached --quiet -- demo/fixtures; then
+            echo "No fixture change: this recording already ships."
             exit 0
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add demo/fixtures
           git commit -m "demo: record $TERM_INPUT fixture on linux/x64 for cross-platform offline replay"
           git push

@@ -30,6 +30,15 @@ from cda.types import ClusterSummary, JointClustering
 END_OF_LLM_BODY = "<!-- cda: end of LLM body; computed sections follow -->"
 
 
+def silhouette_text(clustering: ClusterSummary | JointClustering) -> str:
+    """The silhouette to three decimals, or "n/a" when no valid partition was found.
+
+    A clustering without a partition carries a placeholder silhouette of 0.0,
+    which would otherwise read as a measured (if weak) separation.
+    """
+    return f"{clustering.silhouette:.3f}" if clustering.used else "n/a"
+
+
 def _header(
     model: str,
     stats: dict,
@@ -40,7 +49,7 @@ def _header(
 ) -> str:
     mode_line = (
         f"<!-- clustering_mode: joint, joint_k={joint.n_clusters}, "
-        f"joint_silhouette={joint.silhouette:.3f} -->\n"
+        f"joint_silhouette={silhouette_text(joint)} -->\n"
         if joint is not None
         else "<!-- clustering_mode: independent -->\n"
     )
@@ -52,9 +61,9 @@ def _header(
         f"literature_passages: {stats.get('literature_passages', 0)} -->\n"
         f"{mode_line}"
         f"<!-- researcher_clusters: k={researcher.n_clusters}, "
-        f"sil={researcher.silhouette:.3f}, N={researcher.n_total_passages} | "
+        f"sil={silhouette_text(researcher)}, N={researcher.n_total_passages} | "
         f"literature_clusters: k={literature.n_clusters}, "
-        f"sil={literature.silhouette:.3f}, N={literature.n_total_passages} -->\n\n"
+        f"sil={silhouette_text(literature)}, N={literature.n_total_passages} -->\n\n"
     )
 
 
@@ -214,6 +223,13 @@ def render_stability_markdown(stability: dict | None) -> str:
         return "*Stability check disabled (`clustering.stability_check.enabled: false`).*"
 
     def corpus_line(label: str, corpus: dict) -> str:
+        no_partition = corpus.get("no_partition_trials", 0)
+        if not corpus.get("canonical_partition_found", True):
+            return (
+                f"**{label}**: no valid partition was found in {no_partition} of "
+                f"{corpus['trials']} orderings, including this run's own — there is "
+                "no cluster structure here to call robust or fragile."
+            )
         rate = corpus["k_match_rate"]
         if rate is None:
             return (
@@ -237,11 +253,17 @@ def render_stability_markdown(stability: dict | None) -> str:
             if len(corpus["k_seen"]) == 1
             else f"{corpus['k_seen'][0]}–{corpus['k_seen'][-1]}"
         )
+        missing = (
+            f"; no valid partition was found in {no_partition} of {corpus['trials']} orderings"
+            if no_partition
+            else ""
+        )
         return (
             f"**{label}**: k={corpus['canonical_k']} matched {rate:.0%} of "
             f"{corpus.get('shuffled_trials', corpus['trials'])} shuffled orderings "
             f"(k ranged {k_range}; "
-            f"silhouette {corpus['silhouette_min']:.3f}–{corpus['silhouette_max']:.3f})"
+            f"silhouette {corpus['silhouette_min']:.3f}–{corpus['silhouette_max']:.3f}"
+            f"{missing})"
             f"{caveat}"
         )
 

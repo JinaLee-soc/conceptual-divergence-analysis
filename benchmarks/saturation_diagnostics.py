@@ -9,16 +9,19 @@ lucky) ARI-plateau, using the same seeded machinery the pipeline runs
      at fixed k and measure pairwise ARI. If ARI >= threshold is attainable
      at k=2 but not at fine k, the plateau rule structurally rewards coarse
      structure: "stable" and "coarse" are the same event.
-  B. Ordering - run the real stopping rule under the term-anchor ordering,
-     seeded random permutations, and the reversed (periphery-first) order.
-     If the anchor order saturates earliest, the homogenized term-central
-     prefix is doing the work. Also reports mean cosine-to-anchor of the
-     selected vs excluded passages at the observed N*.
+  B. Ordering - run the real stopping rule under the pipeline's ranking
+     (saturation.ranking: the term anchor, or retrieval similarity), seeded
+     random permutations, and that ranking reversed (periphery-first). If
+     the pipeline order saturates earliest, the homogenized central prefix
+     is doing the work. Also reports mean cosine-to-anchor of the selected
+     vs excluded passages at the observed N*.
   C. Rule sensitivity - run the sweep to the END without stopping, then
      replay the recorded ARI series against a grid of thresholds and
      consecutive-increment requirements: where would each rule have fired?
   D. Perturbation - drop m random sources (m small), rerun the real rule,
-     and report how often the reached/not-reached outcome flips.
+     and report how often the reached/not-reached outcome flips. A drop size
+     that would leave no source is skipped with the reason stated, decided
+     before probe A starts.
 
 Usage:
     python benchmarks/saturation_diagnostics.py --demo --term novelty
@@ -52,7 +55,10 @@ from cda.config import load_config
 from cda.corpus.embeddings import get_embedder
 from cda.corpus.ingest import get_collection
 from cda.extraction.windows import safe_term_slug
-from cda.pipeline import _clustering_kwargs, extract_passages
+from cda.pipeline import _clustering_kwargs, extract_passages, saturation_ranking
+
+RANKING_LABELS = {"term": "term anchor", "similarity": "retrieval similarity"}
+DROP_SIZES = (2, 5, 10)
 
 
 def sweep_params(config) -> dict:
@@ -113,10 +119,19 @@ def probe_a_seed_ari(literature, config, embedder, ns, ks, n_seeds=8):
 
 
 def probe_b_ordering(literature, term, config, embedder, n_random=3):
-    """The real stopping rule under different candidate orderings."""
+    """The real stopping rule under different candidate orderings.
+
+    The first row is the pipeline's own ranking (``saturation.ranking``),
+    labeled with the ranking it actually is.
+    """
     seed = int(config.get("clustering.seed", 42))
-    anchor_ranked = rank_literature(list(literature), term, embedder, mode="term")
-    orderings = [("anchor (pipeline)", anchor_ranked), ("reversed anchor", anchor_ranked[::-1])]
+    ranking = saturation_ranking(config)
+    label = RANKING_LABELS[ranking]
+    pipeline_ranked = rank_literature(list(literature), term, embedder, mode=ranking)
+    orderings = [
+        (f"{label} (pipeline)", pipeline_ranked),
+        (f"reversed {label}", pipeline_ranked[::-1]),
+    ]
     for r in range(n_random):
         rng = np.random.default_rng([seed, 7000 + r])
         permuted = list(literature)
@@ -140,7 +155,7 @@ def probe_b_ordering(literature, term, config, embedder, n_random=3):
                 ),
             }
         )
-    return rows, anchor_ranked
+    return rows, pipeline_ranked
 
 
 def probe_b_anchor_coverage(anchor_ranked, term, embedder, n_star):
@@ -186,21 +201,39 @@ def probe_c_rule_grid(anchor_ranked, config):
     return grid, history
 
 
-def probe_d_perturbation(literature, term, config, embedder, ms=(2, 5, 10), reps=5):
+def plan_probe_d(n_sources: int, ms=DROP_SIZES) -> tuple[list[int], list[str]]:
+    """Drop sizes probe D can run on ``n_sources`` sources, and why the others cannot.
+
+    Dropping m sources needs more than m sources, or nothing is left to rank.
+    Decided before any probe runs, so a too-small library is reported up
+    front rather than crashing after probes A-C.
+    """
+    runnable = [m for m in ms if m < n_sources]
+    skipped = [
+        f"dropping {m} sources skipped: the pool has only {n_sources} source(s)"
+        for m in ms
+        if m >= n_sources
+    ]
+    return runnable, skipped
+
+
+def probe_d_perturbation(literature, term, config, embedder, ms=DROP_SIZES, reps=5):
     """Drop m random sources; does the reached/not outcome flip?"""
     seed = int(config.get("clustering.seed", 42))
+    ranking = saturation_ranking(config)
     sources = sorted({p.source for p in literature})
-    baseline = run_rule(rank_literature(list(literature), term, embedder, mode="term"), config)
+    runnable, _skipped = plan_probe_d(len(sources), ms)
+    baseline = run_rule(rank_literature(list(literature), term, embedder, mode=ranking), config)
     baseline_reached = bool(baseline.get("saturation_reached"))
     rows = []
-    for m in ms:
+    for m in runnable:
         flips = 0
         n_stars = []
         for r in range(reps):
             rng = np.random.default_rng([seed, 9000 + 100 * m + r])
             dropped = set(rng.choice(sources, size=m, replace=False))
             pool = [p for p in literature if p.source not in dropped]
-            info = run_rule(rank_literature(pool, term, embedder, mode="term"), config)
+            info = run_rule(rank_literature(pool, term, embedder, mode=ranking), config)
             if bool(info.get("saturation_reached")) != baseline_reached:
                 flips += 1
             n_stars.append(info.get("n_selected"))
@@ -232,11 +265,19 @@ def main() -> int:
     _researcher, literature, _stats = extract_passages(
         args.term, config, embedder=embedder, collection=collection, progress=lambda _m: None
     )
-    print(f"[satdiag] term='{args.term}' pool={len(literature)} passages")
+    n_sources = len({p.source for p in literature})
+    ranking_label = RANKING_LABELS[saturation_ranking(config)]
+    print(
+        f"[satdiag] term='{args.term}' pool={len(literature)} passages from "
+        f"{n_sources} sources | ranking: {ranking_label}"
+    )
+    drop_sizes, probe_d_skipped = plan_probe_d(n_sources)
+    for reason in probe_d_skipped:
+        print(f"[satdiag] probe D: {reason}")
 
-    print("[satdiag] probe B: ordering (anchor / reversed / random x3) ...")
+    print(f"[satdiag] probe B: ordering ({ranking_label} / reversed / random x3) ...")
     ordering_rows, anchor_ranked = probe_b_ordering(literature, args.term, config, embedder)
-    observed = next(r for r in ordering_rows if r["ordering"] == "anchor (pipeline)")
+    observed = ordering_rows[0]  # the pipeline's own ranking
     n_star = observed["n_selected"] or len(literature)
     coverage = probe_b_anchor_coverage(anchor_ranked, args.term, embedder, n_star)
 
@@ -250,14 +291,15 @@ def main() -> int:
 
     print("[satdiag] probe D: drop-m source perturbations ...")
     perturb_rows, baseline_reached, baseline_n = probe_d_perturbation(
-        literature, args.term, config, embedder
+        literature, args.term, config, embedder, ms=drop_sizes
     )
 
     now = datetime.now()
     lines = [
         f'# Saturation diagnostics: "{args.term}" ({now:%Y-%m-%d %H:%M})',
         "",
-        f"Pool: {len(literature)} passages. Observed rule: ARI >= "
+        f"Pool: {len(literature)} passages from {n_sources} sources; pipeline ranking: "
+        f"{ranking_label} (saturation.ranking). Observed rule: ARI >= "
         f"{config.get('saturation.ari_threshold')} x "
         f"{config.get('saturation.consecutive_increments')} consecutive; "
         f"observed N*={n_star} (reached={observed['reached']}).",
@@ -288,8 +330,8 @@ def main() -> int:
         )
     lines += [
         "",
-        f"Anchor coverage at N*={n_star}: selected passages' mean cosine to the "
-        f"term anchor {coverage['selected_mean_cos']} vs excluded "
+        f"Anchor coverage at N*={n_star} ({ranking_label} ranking): selected "
+        f"passages' mean cosine to the term anchor {coverage['selected_mean_cos']} vs excluded "
         f"{coverage['excluded_mean_cos']} (the gap measures how term-central "
         "the clustered sample is).",
         "",
@@ -305,6 +347,7 @@ def main() -> int:
         "## D. Outcome sensitivity to dropping m sources",
         "",
         f"Baseline: reached={baseline_reached}, N*={baseline_n}",
+        *[f"- {reason}" for reason in probe_d_skipped],
         "",
         "| sources dropped | reps | outcome flips | N* per rep |",
         "|---:|---:|---:|---|",
@@ -341,7 +384,9 @@ def main() -> int:
                 "probe_b_ordering": ordering_rows,
                 "probe_c_rule_grid": grid,
                 "probe_c_history": history,
+                "ranking": saturation_ranking(config),
                 "probe_d_perturbation": perturb_rows,
+                "probe_d_skipped": probe_d_skipped,
             },
             indent=2,
             default=str,

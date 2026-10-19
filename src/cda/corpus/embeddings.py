@@ -21,6 +21,28 @@ class Embedder(Protocol):
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
+# sentence-transformers prefixes a bare model name with this organization
+# unless it is one of the original transformers checkpoints (bert-base-uncased, …).
+_HUB_ORGANIZATION = "sentence-transformers"
+
+
+def hub_model_id(name: str) -> str:
+    """The Hugging Face repo id sentence-transformers loads for ``name``.
+
+    "all-MiniLM-L6-v2" loads "sentence-transformers/all-MiniLM-L6-v2"; local
+    paths and names that already carry an organization are unchanged.
+    """
+    if "/" in name or os.path.exists(name):
+        return name
+    try:
+        from sentence_transformers.util.misc import ORIGINAL_TRANSFORMER_MODELS
+    except ImportError:  # older or stubbed sentence-transformers
+        ORIGINAL_TRANSFORMER_MODELS = ()
+    if name.lower() in ORIGINAL_TRANSFORMER_MODELS:
+        return name
+    return f"{_HUB_ORGANIZATION}/{name}"
+
+
 class EmbeddingModelError(RuntimeError):
     """The sentence-embedding model could not be loaded, with a next step.
 
@@ -79,7 +101,11 @@ class SentenceTransformerEmbedder:
 
         from cda.provenance import digest, file_digest
 
-        result = {"requested_revision": self.revision, "resolved_revision": None}
+        result = {
+            "model_id": hub_model_id(self.name),
+            "requested_revision": self.revision,
+            "resolved_revision": None,
+        }
         if self._model is None:
             return dict(result, status="not loaded; no embedding model used")
         root = Path(self.name)
@@ -119,7 +145,7 @@ class SentenceTransformerEmbedder:
         options = {"revision": self.revision}
         if self._cache_folder:
             options["cache_dir"] = self._cache_folder
-        cached = try_to_load_from_cache(self.name, "config.json", **options)
+        cached = try_to_load_from_cache(hub_model_id(self.name), "config.json", **options)
         return cached if isinstance(cached, str) else None
 
     def embed(self, texts: list[str]) -> list[list[float]]:

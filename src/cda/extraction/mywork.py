@@ -50,13 +50,22 @@ def _as_list(value) -> list:
 
 
 def _fold(text: str) -> str:
-    """NFKC, casefolded, accents removed: one spelling for NFC and NFD names."""
+    """NFKC, casefolded, Latin accents removed: one spelling for NFC and NFD names.
+
+    Only marks on Latin letters are accents; a Japanese dakuten or a
+    Cyrillic breve changes the letter itself, so it is kept.
+    """
     text = unicodedata.normalize("NFKC", text).casefold()
-    decomposed = unicodedata.normalize("NFKD", text)
-    # Recompose so Hangul jamo from NFKD become syllables again.
-    return unicodedata.normalize(
-        "NFC", "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    )
+    kept: list[str] = []
+    base_is_latin = False
+    for ch in unicodedata.normalize("NFKD", text):
+        if not unicodedata.combining(ch):
+            base_is_latin = unicodedata.name(ch, "").startswith("LATIN")
+        elif base_is_latin:
+            continue
+        kept.append(ch)
+    # Recompose so Hangul jamo and kana with dakuten become one character again.
+    return unicodedata.normalize("NFC", "".join(kept))
 
 
 def title_tokens(text: str) -> set[str]:
@@ -68,6 +77,34 @@ def title_tokens(text: str) -> set[str]:
     """
     tokens = set(re.findall(r"[^\W_]+", _fold(text)))
     return {t for t in tokens if len(t) > 2 or not t.isascii()} - ENGLISH_STOP_WORDS
+
+
+def _fold_name(name: str) -> str:
+    """NFC and casefolded, so a pattern matches NFC and NFD spellings of a file name alike."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _unusable_titles_error(unusable: list[tuple[str, set[str]]], min_overlap: int) -> ConfigError:
+    """Name each title that can never match and how many usable words it has."""
+    detail = "; ".join(f"{title!r} has {len(tokens)}" for title, tokens in unusable)
+    short_latin = any(
+        t.isascii() and len(t) <= 2
+        for title, _ in unusable
+        for t in re.findall(r"[^\W_]+", _fold(title))
+    )
+    not_counted = (
+        "English stop words and Latin-script words under three letters are not counted"
+        if short_latin
+        else "English stop words are not counted"
+    )
+    return ConfigError(
+        f"mywork.publication_titles entries have fewer usable words than "
+        f"title_match_min_overlap={min_overlap}, so they could never match a file name "
+        f"({detail}). Words are runs of letters and digits between spaces or punctuation, "
+        f"so a title written without spaces is one word; {not_counted}. Add a "
+        "filename_patterns entry for those papers (for example '*keyword*'), or lower "
+        "title_match_min_overlap."
+    )
 
 
 def load_mywork_rules(mywork_config: dict) -> dict:
@@ -84,16 +121,12 @@ def load_mywork_rules(mywork_config: dict) -> dict:
     min_ratio = section.get_float("mywork.title_match_min_ratio", 0.55, minimum=0.0, maximum=1.0)
     titles = [str(t) for t in _as_list(mywork_config.get("publication_titles")) if str(t).strip()]
     tokens = [title_tokens(title) for title in titles]
-    unusable = [t for t, tok in zip(titles, tokens, strict=True) if len(tok) < min_overlap]
+    unusable = [(t, tok) for t, tok in zip(titles, tokens, strict=True) if len(tok) < min_overlap]
     if unusable:
-        raise ConfigError(
-            f"mywork.publication_titles entries {unusable} have fewer than "
-            f"title_match_min_overlap={min_overlap} content words (stop words and "
-            "Latin-script words under three letters are not counted), so they could never match. "
-            "Add a filename_patterns entry for those papers, or lower "
-            "title_match_min_overlap."
-        )
-    patterns = [str(p).strip().lower() for p in _as_list(mywork_config.get("filename_patterns"))]
+        raise _unusable_titles_error(unusable, min_overlap)
+    patterns = [
+        _fold_name(str(p).strip()) for p in _as_list(mywork_config.get("filename_patterns"))
+    ]
     return {
         "priority": priority,
         "patterns": [p for p in patterns if p],
@@ -104,8 +137,8 @@ def load_mywork_rules(mywork_config: dict) -> dict:
 
 
 def _filename_patterns(rules: dict, filename: str, metadata: dict) -> str | None:
-    path = Path(filename)
-    names = (path.name.lower(), path.stem.lower())
+    path = Path(_fold_name(filename))
+    names = (path.name, path.stem)
     for pattern in rules["patterns"]:
         if any(fnmatch.fnmatch(name, pattern) for name in names):
             return f"pattern:{pattern}"

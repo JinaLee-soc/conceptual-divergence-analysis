@@ -77,17 +77,17 @@ def test_inner_straight_quotes_of_a_verified_curly_pair_are_not_unpaired():
     assert "NOT checked" not in render_grounding_markdown(result)
 
 
-def test_marks_inside_an_unverified_curly_pair_still_count_as_unpaired():
+def test_marks_inside_an_unverified_curly_pair_are_listed_not_unpaired():
     body = 'They say “the so-called "theory penalty" falls hardest on senior men” here.'
     quotes, verified, _, unpaired = _counts(body)
     assert (quotes, verified) == (1, 0)
-    assert unpaired == 2
+    assert unpaired == 0  # the inner marks appear in the listed unverified quotation
 
 
 # ---- final sentence punctuation inside the closing mark ------------------
 
 
-@pytest.mark.parametrize("mark", [".", "?", "!"])
+@pytest.mark.parametrize("mark", [".", "?", "!", ";"])
 def test_final_sentence_punctuation_inside_the_mark_is_retried_without_it(mark):
     assert _counts(f'They write "{QUOTE}{mark}" Then more.') == (1, 1, 0, 0)
 
@@ -97,7 +97,7 @@ def test_final_sentence_punctuation_inside_the_mark_is_retried_without_it(mark):
     [
         'They write "argue that novelty is rewarded uneven." Then more.',
         f'They write "{QUOTE}." — lee.pdf here.',
-        f'They write "{QUOTE};" Then more.',
+        f'They write "{QUOTE};" — lee.pdf here.',
     ],
 )
 def test_punctuation_retry_keeps_whole_word_and_source_checks(body):

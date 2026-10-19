@@ -23,6 +23,7 @@ from cda.validation.prompt_loader import load_validation_prompts
 from cda.validation.report import render_validation_report, write_validation_outputs
 from cda.validation.run import run_validation
 from cda.validation.session import (
+    current_endorsement,
     current_revision,
     endorse,
     find_latest_session,
@@ -369,9 +370,11 @@ def render_validate_tab(config, mock_llm: bool, key_ok: bool) -> None:
         if session["sides"].get(side, {}).get("validated")
         for c in partition_for(session, side, current_revision(session, side))["clusters"]
     )
-    if session.get("endorsement"):
-        st.success(f"Endorsed at {session['endorsement']['at']}.")
+    endorsement = current_endorsement(session)
+    if endorsement:
+        st.success(f"Endorsed at {endorsement['at']}.")
     else:
+        _render_endorsement_withdrawn_notice(session)
         note = st.text_input("Endorsement note (optional)", key="validate_endorse_note")
         if st.button(
             "Endorse this structure (finalizes the report)",
@@ -396,6 +399,26 @@ def render_validate_tab(config, mock_llm: bool, key_ok: bool) -> None:
     if report_path.is_file():
         with st.expander("Validation report (updates as you work)"):
             render_report_file(report_path, key_prefix="validate_session")
+
+
+def _render_endorsement_withdrawn_notice(session: dict) -> None:
+    """Say why an earlier endorsement no longer stands, if one was retracted."""
+    withdrawals = session.get("endorsement_withdrawals") or []
+    stale = session.get("endorsement")
+    if withdrawals:
+        last = withdrawals[-1]
+        st.warning(
+            f"Your endorsement of {last['at']} was withdrawn: edit "
+            f"{last['withdrawn_by_edit']} changed the structure (now revision(s) "
+            f"{last['withdrawn_at_revisions']}). Judge the changed clusters, then "
+            "endorse again."
+        )
+    elif stale:
+        st.warning(
+            f"The endorsement of {stale['at']} covers revisions {stale['revisions']}, "
+            "but the structure has changed since. Judge the changed clusters, then "
+            "endorse again."
+        )
 
 
 def _render_validation_curation(session_dir, session, config, mock_llm: bool, key_ok: bool) -> None:

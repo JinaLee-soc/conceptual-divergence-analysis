@@ -83,15 +83,28 @@ button[data-testid="stBaseButton-primary"]:hover { background: #333; color: #fff
   border-radius: 2px;
 }
 [data-testid="stAlert"] [data-testid="stMarkdownContainer"] { color: #111; }
-/* Severity uses icons and border shades within the monochrome interface. */
-[data-testid="stAlert"]:has([data-testid="stAlertContentError"]) { border-left: 4px solid #111; }
-[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) { border-left: 4px solid #555; }
-[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]) { border-left: 4px solid #111; }
-[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) { border-left: 4px solid #333; }
+/* Severity must read without colour: each kind has its own border style and
+   weight, and a text label above the message (Error, Warning, Note, Done). */
+[data-testid="stAlert"]:has([data-testid="stAlertContentError"]) { border-left: 6px solid #111; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) { border-left: 4px dashed #444; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]) { border-left: 2px solid #777; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) { border-left: 6px double #333; }
 [data-testid="stAlertContentError"] [data-testid="stAlertDynamicIcon"] { color: #111; }
-[data-testid="stAlertContentWarning"] [data-testid="stAlertDynamicIcon"] { color: #555; }
-[data-testid="stAlertContentInfo"] [data-testid="stAlertDynamicIcon"] { color: #111; }
+[data-testid="stAlertContentWarning"] [data-testid="stAlertDynamicIcon"] { color: #444; }
+[data-testid="stAlertContentInfo"] [data-testid="stAlertDynamicIcon"] { color: #777; }
 [data-testid="stAlertContentSuccess"] [data-testid="stAlertDynamicIcon"] { color: #333; }
+[data-testid^="stAlertContent"] [data-testid="stMarkdownContainer"]::before {
+  display: block;
+  margin-bottom: .2rem;
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+[data-testid="stAlertContentError"] [data-testid="stMarkdownContainer"]::before { content: "Error"; }
+[data-testid="stAlertContentWarning"] [data-testid="stMarkdownContainer"]::before { content: "Warning"; }
+[data-testid="stAlertContentInfo"] [data-testid="stMarkdownContainer"]::before { content: "Note"; }
+[data-testid="stAlertContentSuccess"] [data-testid="stMarkdownContainer"]::before { content: "Done"; }
 [data-testid="stStatusWidget"] { border-radius: 2px; border-color: #ccc; }
 [data-testid="stMetric"] {
   border-top: 1px solid #111;

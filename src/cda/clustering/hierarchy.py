@@ -28,6 +28,7 @@ from cda.clustering.spherical import (
     select_partition_by_silhouette,
     silhouette_on_sample,
     silhouette_sample_indices,
+    undefined_silhouette_reason,
 )
 
 
@@ -129,10 +130,11 @@ def _fixed_k_result(
     evaluation_indices = silhouette_sample_indices(X.shape[0], silhouette_subsample, seed)
     score = silhouette_on_sample(X, labels, evaluation_indices)
     if score is None:
+        reason = undefined_silhouette_reason(labels, evaluation_indices)
         raise ValueError(
-            f"The fixed k={k} partition has no defined silhouette on the "
-            f"evaluation sample of {silhouette_subsample} passages; raise "
-            "clustering.silhouette_subsample or choose a different k."
+            f"The fixed k={k} partition has no defined silhouette on its "
+            f"evaluation sample ({reason}); raise clustering.silhouette_subsample "
+            "or choose a different k."
         )
     return labels, n_unique, score, [{"k": k, "silhouette": round(score, 4), "fixed": True}]
 

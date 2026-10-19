@@ -22,6 +22,39 @@ from cda.types import Passage
 JOINT = "joint"
 INDEPENDENT = "independent"
 
+# Why the order-stability check does not apply under a resolution override;
+# shared by the pipeline's built-in check and the standalone benchmark.
+RESOLUTION_OVERRIDE_REASON = (
+    "clustering.method/clustering.k override the paper's "
+    "silhouette k-selection, which is what this check measures"
+)
+
+
+def resolution_override_reason(resolution: dict) -> str | None:
+    """The refusal reason when ``resolution_params`` departs from auto k-means, else None.
+
+    A fixed k cannot vary with passage order, and the hierarchical tree is
+    order-independent by construction, so the statistic would be vacuous.
+    """
+    if resolution["method"] != "kmeans" or resolution["fixed_k"] is not None:
+        return RESOLUTION_OVERRIDE_REASON
+    return None
+
+
+def _trial_fields(summary, prefix: str = "") -> dict:
+    """k, silhouette and whether a valid partition was found, for one clustering.
+
+    A summary without a valid partition (``used`` is False) carries the
+    placeholder k=1 / silhouette=0.0; its silhouette is recorded as None so
+    it can never enter a silhouette range.
+    """
+    found = bool(summary.used)
+    return {
+        f"{prefix}k": summary.n_clusters,
+        f"{prefix}silhouette": summary.silhouette if found else None,
+        f"{prefix}partition_found": found,
+    }
+
 
 def detached(passages: list[Passage]) -> list[Passage]:
     """Per-passage copies, so a trial cannot write back onto the caller's list.
@@ -65,9 +98,10 @@ def run_trials(
     already hydrated, and it doubles as an internal consistency check: it
     must reproduce the caller's own clustering exactly). Trials 1..N-1 are
     independently seeded shuffles. Returns one dict per trial: joint mode
-    carries ``k``/``silhouette``; independent mode carries
-    ``researcher_k``/``researcher_silhouette``/``literature_k``/
-    ``literature_silhouette``, since the two corpora can drift independently.
+    carries ``k``/``silhouette``/``partition_found``; independent mode
+    carries the same three per corpus with a ``researcher_``/``literature_``
+    prefix, since the two corpora can drift independently. A trial without
+    a valid partition has ``partition_found`` False and silhouette None.
     """
     if trials > 1000:
         raise ValueError(
@@ -94,7 +128,7 @@ def run_trials(
                 n_representatives=n_representatives,
                 **clustering_kwargs,
             )
-            results.append({"trial": trial, "k": joint.n_clusters, "silhouette": joint.silhouette})
+            results.append({"trial": trial, **_trial_fields(joint)})
         else:
             researcher_summary = cluster_passages(
                 r_trial,
@@ -115,16 +149,19 @@ def run_trials(
             results.append(
                 {
                     "trial": trial,
-                    "researcher_k": researcher_summary.n_clusters,
-                    "researcher_silhouette": researcher_summary.silhouette,
-                    "literature_k": literature_summary.n_clusters,
-                    "literature_silhouette": literature_summary.silhouette,
+                    **_trial_fields(researcher_summary, "researcher_"),
+                    **_trial_fields(literature_summary, "literature_"),
                 }
             )
     return results
 
 
-def _corpus_summary(ks: list[int], sils: list[float], expected_k: int | None = None) -> dict:
+def _corpus_summary(
+    ks: list[int],
+    sils: list[float | None],
+    found: list[bool],
+    expected_k: int | None = None,
+) -> dict:
     """Stats over the trials, with the canonical run kept out of the rate.
 
     ``ks[0]`` is the canonical order re-clustered, not a shuffle. Counting it
@@ -135,6 +172,12 @@ def _corpus_summary(ks: list[int], sils: list[float], expected_k: int | None = N
     shuffled trials at all the rate is ``None``, not 0.0 — "nothing was
     tested" must not read as "nothing agreed".
 
+    Trials without a valid partition (``found`` False) are no structure at
+    all: they never count as a match (so a canonical run without a partition
+    has a rate of 0.0, never a "robust" 1.0), and they are left out of
+    ``k_seen`` and the silhouette range (None when no trial found one).
+    ``no_partition_trials`` counts them over all trials, canonical included.
+
     ``canonical_reproduced`` is the consistency check trial 0 performs:
     re-clustering the caller's own order must land on the k the caller's
     own pipeline run produced (``expected_k``). False means the clustering
@@ -143,20 +186,29 @@ def _corpus_summary(ks: list[int], sils: list[float], expected_k: int | None = N
     a check that was not run is omitted, never reported as passed.
     """
     canonical_k = ks[0]
-    shuffled_ks = ks[1:]
-    matches = sum(1 for k in shuffled_ks if k == canonical_k)
+    canonical_found = found[0]
+    shuffled = list(zip(ks[1:], found[1:], strict=True))
+    matches = sum(1 for k, ok in shuffled if canonical_found and ok and k == canonical_k)
+    found_sils = [sil for sil, ok in zip(sils, found, strict=True) if ok]
     summary = {
         "canonical_k": canonical_k,
         "trials": len(ks),
-        "shuffled_trials": len(shuffled_ks),
-        "k_match_rate": round(matches / len(shuffled_ks), 4) if shuffled_ks else None,
-        "k_seen": sorted(set(ks)),
-        "silhouette_min": round(min(sils), 4),
-        "silhouette_max": round(max(sils), 4),
+        "shuffled_trials": len(shuffled),
+        "k_match_rate": round(matches / len(shuffled), 4) if shuffled else None,
+        "k_seen": sorted({k for k, ok in zip(ks, found, strict=True) if ok}),
+        "silhouette_min": round(min(found_sils), 4) if found_sils else None,
+        "silhouette_max": round(max(found_sils), 4) if found_sils else None,
+        "canonical_partition_found": canonical_found,
+        "no_partition_trials": found.count(False),
     }
     if expected_k is not None:
         summary["canonical_reproduced"] = canonical_k == expected_k
     return summary
+
+
+def _found(results: list[dict], key: str) -> list[bool]:
+    """Per-trial partition flags; trials recorded before the flag existed count as found."""
+    return [bool(r.get(key, True)) for r in results]
 
 
 def summarize(
@@ -188,6 +240,7 @@ def summarize(
             **_corpus_summary(
                 [r["k"] for r in results],
                 [r["silhouette"] for r in results],
+                _found(results, "partition_found"),
                 expected_k=expected_k,
             ),
         }
@@ -197,11 +250,13 @@ def summarize(
         "researcher": _corpus_summary(
             [r["researcher_k"] for r in results],
             [r["researcher_silhouette"] for r in results],
+            _found(results, "researcher_partition_found"),
             expected_k=expected_researcher_k,
         ),
         "literature": _corpus_summary(
             [r["literature_k"] for r in results],
             [r["literature_silhouette"] for r in results],
+            _found(results, "literature_partition_found"),
             expected_k=expected_literature_k,
         ),
     }

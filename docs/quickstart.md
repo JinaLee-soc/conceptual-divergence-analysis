@@ -72,8 +72,12 @@ fictional researcher treats *novelty* as "audience repair," while the
 literature treats it as a property of ideas. A second example,
 `cda demo --term consensus --mock-llm`, can assemble a slightly different
 prompt on another CPU architecture; if it reports a missing fixture, record
-that platform's fixture once (see [demo/fixtures/README.md](../demo/fixtures/README.md))
-or just use the novelty demo above.
+your own once with a live run, `cda demo --term consensus --record-fixtures`
+(needs `ANTHROPIC_API_KEY`, ~$0.10–0.15). Later mock runs replay that
+recording, made under your configured `llm.model`, before the committed
+`claude-code-session` fixture, and the report header names the model
+replayed (see [demo/fixtures/README.md](../demo/fixtures/README.md)). Or
+just use the novelty demo above.
 
 Prefer clicking to typing from a terminal? `streamlit run gui/app.py`
 (install with `pip install -e ".[gui]"`) gives the same demo as a button,
@@ -159,8 +163,9 @@ your machine (short version: passages inside prompts, nothing else).
 
 After updating CDA, run your usual `cda ingest --pdf-dir ... --zotero-csv ...`
 command once. Sentences are split with pysbd 0.3.4 in blocks ending at detected sentence
-boundaries (`pysbd-0.3.4+blocks-v2`). Blank lines and block-size limits do not
-split a sentence. Every chunk records the segmenter and the boundaries it
+boundaries (`pysbd-0.3.4+blocks-v3`). Blank lines and block-size limits do not
+split a sentence, and the CJK full stops 。！？． end a sentence without a
+following space. Every chunk records the segmenter and the boundaries it
 produced; chunks from an older version are detected and re-ingested, and
 analysis stops with an actionable error until they are. The same command also
 refreshes any source whose PDF changed and updates Zotero fields in place when

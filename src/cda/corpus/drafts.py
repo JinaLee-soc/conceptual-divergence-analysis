@@ -12,6 +12,7 @@ import hashlib
 import html
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,13 +22,16 @@ from cda.extraction.windows import split_sentences
 SUPPORTED_EXTENSIONS = {".docx", ".md", ".txt", ".pdf"}
 
 # Placeholders docx2python writes into extracted text (note references, note
-# labels, images, hyperlinks); they are markup, not the researcher's prose.
+# labels, list markers, images); they are markup, not the researcher's prose.
+# Hyperlinks are removed separately (``_strip_hyperlinks``).
 _DOCX2PYTHON_MARKUP = (
     (re.compile(r"----(?:footnote|endnote)-?\d+----"), ""),
     (re.compile(r"(?m)^(?:footnote|endnote)-?\d+\)\t"), ""),
+    # A list item's marker: one tab per indent level, then "--" (a bullet) or
+    # a number, letter, or Roman numeral with ")", then a tab.
+    (re.compile(r"(?m)^\t*(?:--|\u2022|(?:\d+|[a-z]+|[A-Z]+)\))\t"), ""),
     (re.compile(r"----Image alt text---->[^<]*<"), ""),
     (re.compile(r"----media/[^\s]*?----"), ""),
-    (re.compile(r'<a href="[^"]*">(.*?)</a>', re.DOTALL), r"\1"),
     # A symbol-font character (Word's <w:sym>, e.g. Symbol or Wingdings):
     # docx2python wraps an HTML character reference in a span. Only the span
     # content is unescaped; the researcher's own "&amp;" or "<b>" stays as typed.
@@ -52,6 +56,21 @@ def _normalize_text(text: str) -> str:
     return unicodedata.normalize("NFC", re.sub(r"\s+", " ", text).strip())
 
 
+def _strip_hyperlinks(text: str, targets: set[str]) -> str:
+    """Replace docx2python's ``<a href="target">text</a>`` with the link text.
+
+    docx2python 3.7 writes this markup for every hyperlink, with or without
+    ``html=True``, and typed prose is not escaped without it. Only anchors whose
+    target is one of the document's own relationship targets are markup, so
+    HTML the researcher typed (an ``<a href>`` example) stays in the text.
+    """
+    if not targets:
+        return text
+    alternatives = "|".join(re.escape(t) for t in sorted(targets, key=len, reverse=True))
+    pattern = re.compile(rf'<a href="(?:{alternatives})(?:#[^"]*)?">(.*?)</a>', re.DOTALL)
+    return pattern.sub(r"\1", text)
+
+
 def _read_docx(path: Path) -> str:
     """Body (tables and text boxes included), footnotes, and endnotes of a .docx.
 
@@ -63,6 +82,10 @@ def _read_docx(path: Path) -> str:
     with docx2python(path) as content:
         parts = [content.body, content.footnotes, content.endnotes]
         text = "\n".join(paragraph for part in parts for paragraph in iter_paragraphs(part))
+        targets = {
+            str(target) for file in content.docx_reader.files for target in file.rels.values()
+        }
+    text = _strip_hyperlinks(text, targets)
     for pattern, replacement in _DOCX2PYTHON_MARKUP:
         text = pattern.sub(replacement, text)
     return text
@@ -109,11 +132,50 @@ def _read_text_draft(path: Path, progress: Callable[[str], None]) -> str:
     return text
 
 
+# A line counts as a running head or foot when it appears, digits aside, at
+# the top or bottom of at least this many pages.
+_RUNNING_LINE_MIN_PAGES = 3
+_RUNNING_LINE_EDGE = 2  # lines examined at each page edge
+
+
+def _running_line_key(line: str) -> str:
+    """A page-edge line compared across pages: digits (page numbers) ignored."""
+    return re.sub(r"\d+", "", line).strip().casefold()
+
+
+def _edge_lines(lines: list[str]) -> list[int]:
+    """Indexes of the first and last few non-blank lines of one page."""
+    filled = [i for i, line in enumerate(lines) if line.strip()]
+    return sorted(set(filled[:_RUNNING_LINE_EDGE] + filled[-_RUNNING_LINE_EDGE:]))
+
+
+def strip_running_lines(pages: list[str]) -> list[str]:
+    """Pages without the header and footer lines that repeat across them.
+
+    A PDF export repeats a running head (title, author, journal) and page
+    numbers on every page; glued into the prose, they would change the
+    sentences around every page break. A page-edge line is removed when the
+    same line, ignoring digits, is at an edge of at least
+    ``_RUNNING_LINE_MIN_PAGES`` pages.
+    """
+    split = [page.splitlines() for page in pages]
+    counts = Counter(
+        key for lines in split for key in {_running_line_key(lines[i]) for i in _edge_lines(lines)}
+    )
+    running = {key for key, n in counts.items() if n >= _RUNNING_LINE_MIN_PAGES}
+    cleaned = []
+    for lines in split:
+        drop = {i for i in _edge_lines(lines) if _running_line_key(lines[i]) in running}
+        cleaned.append("\n".join(line for i, line in enumerate(lines) if i not in drop))
+    return cleaned
+
+
 def _read_pdf(path: Path) -> str:
     import fitz  # pymupdf
 
     with fitz.open(str(path)) as doc:
-        return "\n".join(page.get_text("text") for page in doc)
+        pages = [page.get_text("text") for page in doc]
+    return "\n".join(strip_running_lines(pages))
 
 
 # Share of sentences two drafts may have in common before they count as one
@@ -203,10 +265,17 @@ def load_drafts(
         return {}
 
     texts: dict[str, str] = {}
+    hidden: list[str] = []
     for path in sorted(drafts_dir.rglob("*")):
         if not path.is_file() or path.name.startswith("~$"):
             continue
         suffix = path.suffix.lower()
+        if path.name.startswith(".") and suffix in SUPPORTED_EXTENSIONS:
+            # macOS AppleDouble files ("._paper.docx") and other hidden files
+            # are not drafts, even with a draft extension. Others (.DS_Store)
+            # are skipped quietly below.
+            hidden.append(str(path.relative_to(drafts_dir)))
+            continue
         if suffix not in SUPPORTED_EXTENSIONS:
             fix = _UNSUPPORTED_DRAFT_EXTENSIONS.get(suffix)
             if fix:
@@ -239,5 +308,10 @@ def load_drafts(
                 "file, or a scanned PDF without OCR?) — it will not count as "
                 "researcher writing in this analysis"
             )
+    if hidden:
+        progress(
+            f"  [draft] skipped {len(hidden)} hidden file(s) (names starting with '.', such "
+            f"as macOS '._' copies): {', '.join(hidden[:5])}" + (" …" if len(hidden) > 5 else "")
+        )
     _refuse_duplicate_drafts(texts)
     return texts

@@ -33,7 +33,9 @@ for the researcher-led validation rules.
   merges/splits inside a validation session. Never feeds back into
   `cda analyze`.
 - **Endorsement** — the researcher's closing act of a validation session:
-  accepting the (possibly curated) structure as her considered reading.
+  accepting the (possibly curated) structure as her considered reading. An
+  edit applied afterwards withdraws it (the report keeps the withdrawal);
+  endorse again once the changed clusters are judged.
 - **Emergence** — how the literature clusters for a term coalesced over the
   researcher's library-acquisition timeline (`cda emergence`); acquisition
   time, not publication time.

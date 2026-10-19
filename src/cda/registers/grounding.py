@@ -15,7 +15,6 @@ report lists them for that purpose.
 from __future__ import annotations
 
 import re
-import unicodedata
 
 # Double quotes only (straight or curly): single quotes collide with
 # apostrophes far too often to be a reliable quotation marker. A quote may
@@ -23,13 +22,19 @@ import unicodedata
 # pair may enclose straight inner quotes; otherwise every mark is paired
 # left to right, and even empty pairs are consumed so pairing stays aligned.
 # The min_words filter, not the regex, decides what counts as a citation.
-_SPAN = r"(?:[^{excluded}\n]|\n(?!\s*\n)){{0,4000}}?"
+# A blockquote line holding only ">" is a blank line too.
+_SPAN = r"(?:[^{excluded}\n]|\n(?![\s>]*\n)){{0,4000}}?"
 _QUOTE_RE = re.compile(
     "“(?P<curly>" + _SPAN.format(excluded="“”") + ")”"
     '|["“](?P<plain>' + _SPAN.format(excluded='"“”') + ')["”]'
 )
-_ELLIPSIS_RE = re.compile(r"\[\s*(?:\.\.\.|…)\s*\]|\.\.\.|…")
+# "...", "…" and the spaced ". . ." elide text, bracketed or not.
+_ELISION = r"(?:\.(?:[ \u00a0]?\.){2,}|…)"
+_ELLIPSIS_RE = re.compile(rf"\[\s*{_ELISION}\s*\]|{_ELISION}")
+_BLOCKQUOTE_CONTINUATION = re.compile(r"\n[ \t]*(?:>[ \t]*)+")
 _QUOTE_MARK_RE = re.compile(r'["“”]')
+_STRAIGHT = '"'
+_FINAL_PUNCTUATION = ".?!;"
 _ANY_QUOTE_MARK_RE = re.compile(r"[\"“”'‘’]")
 AMBIGUOUS_PREFIX = "[ambiguous nesting, not checked] "
 
@@ -45,23 +50,43 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-def _is_latin_letter(char: str) -> bool:
-    return char.isalpha() and unicodedata.name(char, "").startswith("LATIN")
+def _letter_touches_straight_mark(body: str, match: re.Match) -> bool:
+    """A straight closing mark running into a letter, or a straight opening mark
+    following one, is probably an inner quote paired with an outer one.
 
-
-def _is_ambiguous_pair(body: str, match: re.Match) -> bool:
-    """A pair whose closing mark runs into a word, or whose opening mark follows
-    one, is probably an inner quote paired with an outer one; text between the
-    two pairs would then escape checking.
-
-    Only a Latin letter touching the outside of a mark signals that nesting.
-    Footnote digits ('"…"1', '"…"¹'), markdown underscores ('_"…"_') and
-    letters of other scripts (a Korean particle: '“…”라고') are ordinary
-    neighbours of a complete quotation.
+    A straight mark does not say which way it faces, so a letter of any script
+    counts ('된다 "완전히 …"이'). Curly marks do, so a Korean particle after a
+    closing ” is an ordinary neighbour. Footnote digits ('"…"1', '"…"¹') and
+    markdown underscores ('_"…"_') are never letters.
     """
     before = body[match.start() - 1] if match.start() > 0 else ""
     after = body[match.end()] if match.end() < len(body) else ""
-    return _is_latin_letter(before) or _is_latin_letter(after)
+    opens_after_letter = body[match.start()] == _STRAIGHT and before.isalpha()
+    closes_into_letter = body[match.end() - 1] == _STRAIGHT and after.isalpha()
+    return opens_after_letter or closes_into_letter
+
+
+def _has_spaced_inner_mark(body: str, match: re.Match) -> bool:
+    """A straight mark with a space on its inner side, next to another straight
+    mark on the same line, is probably one end of a spaced inner quote
+    ('"…basis " invented " of …"').
+
+    A closing mark followed by a source attribution is a complete citation.
+    """
+    line_start = body.rfind("\n", 0, match.start()) + 1
+    line_end = body.find("\n", match.end())
+    line_end = len(body) if line_end == -1 else line_end
+    opening_spaced = body[match.start()] == _STRAIGHT and body[match.start() + 1].isspace()
+    closing_spaced = body[match.end() - 1] == _STRAIGHT and body[match.end() - 2].isspace()
+    mark_before = _STRAIGHT in body[line_start : match.start()]
+    mark_after = _STRAIGHT in body[match.end() : line_end]
+    attributed = _SOURCE_SUFFIX.match(body[match.end() :]) is not None
+    return (opening_spaced and mark_before) or (closing_spaced and mark_after and not attributed)
+
+
+def _is_ambiguous_pair(body: str, match: re.Match) -> bool:
+    """Whether text between this pair and a neighbouring one may escape checking."""
+    return _letter_touches_straight_mark(body, match) or _has_spaced_inner_mark(body, match)
 
 
 def _find_fragment(fragment: str, text: str, cursor: int) -> int:
@@ -93,7 +118,7 @@ def _is_grounded(fragments: list[str], passages: list[tuple[str, str]], source: 
 
 
 def _without_final_punctuation(fragments: list[str]) -> list[str] | None:
-    """The fragments with the quotation's final . ? ! removed, or None if it has none.
+    """The fragments with the quotation's final . ? ! ; removed, or None if it has none.
 
     Writers often close a quotation with sentence punctuation the source has
     elsewhere ('"…fields." Then' for '…fields, and …'); the retry still needs a
@@ -101,7 +126,7 @@ def _without_final_punctuation(fragments: list[str]) -> list[str] | None:
     """
     if not fragments:
         return None
-    last = fragments[-1].rstrip(".?!").rstrip()
+    last = fragments[-1].rstrip(_FINAL_PUNCTUATION).rstrip()
     if last == fragments[-1]:
         return None
     return fragments[:-1] + [last] if last else None
@@ -116,17 +141,35 @@ def _is_grounded_allowing_final_punctuation(
     return trimmed is not None and _is_grounded(trimmed, passages, source)
 
 
+# A source filename may itself contain "]": it runs to the "]: " that
+# introduces the passage's opening quote.
 _PASSAGE_RE = re.compile(
-    r'Sample \d+ \[[^\]]+\] \[(?P<source>[^\]]+)\]: ["“](?P<text>.*?)["”](?=\s*(?:Sample \d+|\n|$))',
+    r'Sample \d+ \[[^\]]+\] \[(?P<source>[^\n]+?)\]: ["“](?P<text>.*?)["”](?=\s*(?:Sample \d+|\n|$))',
     re.DOTALL,
 )
 _SOURCE_SUFFIX = re.compile(
-    r"^\s*[-–—]\s*\*?\[?([^\]\n*]+?\.(?:pdf|md|txt|docx|abstract))\]?\*?", re.IGNORECASE
+    r"^\s*[-–—]\s*\*?\[?([^\n*]+?\.(?:pdf|md|txt|docx|abstract))\]?\*?", re.IGNORECASE
 )
 
 
 def _preview(quote: str) -> str:
     return quote if len(quote) <= 110 else quote[:107] + "…"
+
+
+def _word_count(fragment: str) -> int:
+    """Words in a fragment; punctuation-only tokens are not words."""
+    return sum(1 for token in fragment.split() if re.search(r"\w", token))
+
+
+def _fragments(quote: str) -> list[str]:
+    """The quotation's elided pieces, with blockquote '>' continuations removed."""
+    text = _BLOCKQUOTE_CONTINUATION.sub("\n", quote)
+    return [piece for piece in _ELLIPSIS_RE.split(text) if piece.strip()]
+
+
+def _has_tiny_elided_fragment(fragments: list[str]) -> bool:
+    """An elided quotation built from one-word pieces matches almost any passage."""
+    return len(fragments) > 1 and any(_word_count(piece) < 2 for piece in fragments)
 
 
 def check_quotations(llm_body: str, user_prompt: str, *, min_words: int = 6) -> dict:
@@ -143,8 +186,9 @@ def check_quotations(llm_body: str, user_prompt: str, *, min_words: int = 6) -> 
     n_marks_paired = 0
     unverified = []
     for match in _QUOTE_RE.finditer(llm_body):
-        n_marks_paired += 2
         quote = match.group("curly") if match.group("curly") is not None else match.group("plain")
+        # Straight inner quotes of a curly pair are checked or listed with it.
+        n_marks_paired += 2 + len(_QUOTE_MARK_RE.findall(quote))
         if _is_ambiguous_pair(llm_body, match):
             n_quotes += 1
             n_ambiguous += 1
@@ -152,14 +196,15 @@ def check_quotations(llm_body: str, user_prompt: str, *, min_words: int = 6) -> 
             continue
         suffix = _SOURCE_SUFFIX.match(llm_body[match.end() :])
         source = suffix.group(1).strip() if suffix else None
-        if not source and len(quote.split()) < min_words:
+        pieces = _fragments(quote)
+        if not source and sum(_word_count(piece) for piece in pieces) < min_words:
             continue
-        fragments = [_normalize(x) for x in _ELLIPSIS_RE.split(quote) if x.strip()]
         n_quotes += 1
-        if _is_grounded_allowing_final_punctuation(fragments, passages, source):
+        fragments = [_normalize(piece) for piece in pieces]
+        if not _has_tiny_elided_fragment(pieces) and _is_grounded_allowing_final_punctuation(
+            fragments, passages, source
+        ):
             n_verified += 1
-            # Straight inner quotes of a verified curly pair were checked with it.
-            n_marks_paired += len(_QUOTE_MARK_RE.findall(quote))
         else:
             unverified.append(_preview(quote))
     unpaired = max(0, len(_QUOTE_MARK_RE.findall(llm_body)) - n_marks_paired)

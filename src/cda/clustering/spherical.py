@@ -129,15 +129,25 @@ def kmeans_labels(
     return contiguous_labels(best_labels), best_inertia
 
 
+def _undefined_reason(labels: np.ndarray) -> str | None:
+    """Why the silhouette of ``labels`` is undefined, or None when it is defined."""
+    n_labels = len(np.unique(labels))
+    if n_labels < 2:
+        return f"fewer than two clusters among the {len(labels)} evaluated passages"
+    if n_labels >= len(labels):
+        return f"each of the {len(labels)} evaluated passages is its own cluster"
+    return None
+
+
 def silhouette(X: np.ndarray, labels: np.ndarray) -> float | None:
     """Mean cosine silhouette, or None where it is undefined.
 
-    Undefined means fewer than two clusters, or every point its own cluster.
+    Undefined means fewer than two clusters, or every point its own cluster
+    (``undefined_silhouette_reason`` names which).
     """
     from sklearn.metrics import silhouette_score
 
-    n_labels = len(np.unique(labels))
-    if not 2 <= n_labels < len(X):
+    if _undefined_reason(labels) is not None:
         return None
     return float(silhouette_score(X, labels, metric="cosine"))
 
@@ -278,6 +288,7 @@ def silhouette_sample_indices(n_samples: int, subsample: int, seed: int) -> np.n
 
     A k sweep must call this once and reuse the result for every candidate.
     Otherwise sampling noise is mixed into the comparison between k values.
+    ``silhouette_on_sample`` extends it per partition so no cluster is missed.
     """
     if n_samples > subsample:
         rng = np.random.default_rng(seed)
@@ -285,13 +296,43 @@ def silhouette_sample_indices(n_samples: int, subsample: int, seed: int) -> np.n
     return None
 
 
+def covering_sample(labels: np.ndarray, sample_indices: np.ndarray) -> np.ndarray:
+    """The fixed sample plus the lowest-index member of every cluster it misses.
+
+    A random subsample can miss a small cluster entirely, which would score a
+    different partition than the one being selected (or leave too few clusters
+    for a silhouette at all). Adding one deterministic member per missing
+    cluster keeps the evaluation set fixed across candidates apart from those
+    additions. Returns sorted row indices.
+    """
+    clusters, first_member = np.unique(labels, return_index=True)
+    missing = first_member[~np.isin(clusters, labels[sample_indices])]
+    if missing.size == 0:
+        return sample_indices
+    return np.union1d(sample_indices, missing)
+
+
 def silhouette_on_sample(
     X: np.ndarray, labels: np.ndarray, sample_indices: np.ndarray | None
 ) -> float | None:
-    """Cosine silhouette on a caller-supplied fixed evaluation set (None if undefined)."""
+    """Cosine silhouette on a caller-supplied fixed evaluation set (None if undefined).
+
+    With a subsample, every cluster of ``labels`` is represented (see
+    ``covering_sample``); without one (``None``) all rows are scored.
+    """
     if sample_indices is not None:
-        return silhouette(X[sample_indices], labels[sample_indices])
+        rows = covering_sample(labels, sample_indices)
+        return silhouette(X[rows], labels[rows])
     return silhouette(X, labels)
+
+
+def undefined_silhouette_reason(
+    labels: np.ndarray, sample_indices: np.ndarray | None
+) -> str | None:
+    """Why ``silhouette_on_sample`` returned None for this partition, for the logs."""
+    if sample_indices is not None:
+        labels = labels[covering_sample(labels, sample_indices)]
+    return _undefined_reason(labels)
 
 
 def clip_k(requested_k: int, n_samples: int) -> tuple[int, dict]:
@@ -316,9 +357,9 @@ def select_partition_by_silhouette(
     ``candidates`` yields (requested_k, labels, log_fields); labels is None
     when the candidate could not be built (its log_fields say why).
     Partitions with fewer than two clusters, a cluster with no mean direction
-    (logged as ``invalid``), or an undefined silhouette are logged with
-    ``silhouette: None`` and never selected, so one degenerate k never aborts
-    the sweep. Ties keep the earliest candidate. Returns (labels, k,
+    (logged as ``invalid``), or an undefined silhouette (logged with the
+    reason as ``silhouette_undefined``) are logged with ``silhouette: None``
+    and never selected, so one degenerate k never aborts the sweep. Ties keep the earliest candidate. Returns (labels, k,
     silhouette, sweep_log); labels and silhouette are None when no candidate
     is valid.
     """
@@ -340,6 +381,7 @@ def select_partition_by_silhouette(
         entry: dict = {"k": k, "silhouette": None if score is None else round(score, 4)}
         if score is None:
             entry["n_unique_clusters"] = n_unique
+            entry["silhouette_undefined"] = undefined_silhouette_reason(labels, evaluation_indices)
         entry.update(log_fields)
         sweep_log.append(entry)
         if score is not None and (best_score is None or score > best_score):
@@ -395,7 +437,8 @@ def select_k_by_silhouette(
 ) -> tuple[np.ndarray | None, int, float | None, list[dict]]:
     """Silhouette-best post-merge k-means partition over k = 2..max_k.
 
-    Every k is scored on one fixed evaluation sample, so the reported k and
+    Every k is scored on one fixed evaluation sample (extended by one member
+    of any cluster it misses, see ``covering_sample``), so the reported k and
     silhouette describe the same final partition and are comparable across k.
     max_k is capped at n - 1 (see ``clip_k``). Returns (labels, k,
     silhouette, sweep_log); labels and silhouette are None when no valid

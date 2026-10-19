@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from cda.config import Config, ConfigError
@@ -19,6 +19,7 @@ from cda.corpus.zotero import normalize_key
 from cda.extraction.windows import (
     SENTENCE_SEGMENTER,
     infer_year,
+    literal_pattern,
     normalize_text,
     sentence_windows,
     split_sentences,
@@ -29,13 +30,13 @@ from cda.types import Passage
 
 
 def literal_filter(term: str) -> dict:
-    """A ``where_document`` filter matching the literal term in any letter case.
+    r"""A ``where_document`` filter matching the literal term in any letter case.
 
-    The term is NFC-normalized because chunk text is NFC-normalized at ingest.
-    ``re.escape`` output is accepted by Chroma's Rust regex engine.
+    The term is NFC-normalized because chunk text is NFC-normalized at ingest,
+    and whitespace between words matches any whitespace (``literal_pattern``).
+    ``re.escape`` output and ``\s`` are accepted by Chroma's Rust regex engine.
     """
-    term = unicodedata.normalize("NFC", term)
-    return {"$regex": f"(?i){re.escape(term)}"}
+    return {"$regex": f"(?i){literal_pattern(term)}"}
 
 
 def keyword_hits(
@@ -59,7 +60,7 @@ def keyword_hits(
     # only candidates containing the full literal phrase count toward the cap.
     anchor = max(words, key=len) if phrase else term
     where_document = literal_filter(anchor)
-    phrase_pattern = re.compile(re.escape(unicodedata.normalize("NFC", term)), re.IGNORECASE)
+    phrase_pattern = re.compile(literal_pattern(term), re.IGNORECASE)
     seen_ids: set[str] = set()
     offset = 0
     capped = False
@@ -129,8 +130,9 @@ def keyword_hits(
 def _stored_sentences(context: str, lengths) -> list[str] | None:
     """The ingest-time sentences of ``context`` from their stored lengths; ``None`` if invalid.
 
-    Sentences are joined by single spaces at ingest, so the lengths must
-    tile the context exactly with one space between neighbors.
+    Sentences are joined by single spaces at ingest, or by nothing after a
+    CJK full stop, so the lengths must tile the context exactly with at most
+    one space between neighbors. A sentence never starts with a space.
     """
     try:
         sizes = json.loads(lengths) if isinstance(lengths, str) else None
@@ -140,12 +142,47 @@ def _stored_sentences(context: str, lengths) -> list[str] | None:
         return None
     sentences, cursor = [], 0
     for i, size in enumerate(sizes):
-        if i and context[cursor : cursor + 1] != " ":
+        cursor += bool(i) and context[cursor : cursor + 1] == " "
+        sentence = context[cursor : cursor + size]
+        if sentence[:1].isspace():
             return None
-        cursor += bool(i)
-        sentences.append(context[cursor : cursor + size])
+        sentences.append(sentence)
         cursor += size
     return sentences if cursor == len(context) else None
+
+
+def _hit_source(chunk_id: str, metadata: dict) -> str:
+    """The source a hit came from, for messages: its relpath, file name, or chunk id."""
+    return str(metadata.get("pdf_relpath") or metadata.get("pdf_filename") or chunk_id)
+
+
+def _is_legacy_chunk(metadata: dict) -> bool:
+    """An indexed chunk stored without its original sentence boundaries."""
+    if metadata.get("sentence_context") is None:
+        return "chunk_index" in metadata or "total_chunks" in metadata
+    return "sentence_lengths" not in metadata
+
+
+def _legacy_sources_error(sources: list[str]) -> ConfigError:
+    listing = "\n".join(f"    {source}" for source in sources)
+    return ConfigError(
+        f"{len(sources)} source(s) in this corpus lack original sentence boundaries "
+        f"(ingested by an older version):\n{listing}\n"
+        "Run cda ingest again (with the same --pdf-dir) to re-ingest them before analysis."
+    )
+
+
+def _refuse_legacy_chunks(merged_hits: dict) -> None:
+    """Refuse legacy chunks before any extraction, naming every affected source."""
+    legacy = sorted(
+        {
+            _hit_source(chunk_id, record.get("metadata") or {})
+            for chunk_id, record in merged_hits.items()
+            if _is_legacy_chunk(record.get("metadata") or {})
+        }
+    )
+    if legacy:
+        raise _legacy_sources_error(legacy)
 
 
 def _chunk_sentences(chunk_id: str, document: str, metadata: dict) -> tuple[list[str], bool]:
@@ -161,13 +198,10 @@ def _chunk_sentences(chunk_id: str, document: str, metadata: dict) -> tuple[list
         raise ConfigError(
             f"Corpus chunk {chunk_id!r} has no text; re-ingest its source with cda ingest --reingest."
         )
+    if _is_legacy_chunk(metadata):
+        raise _legacy_sources_error([_hit_source(chunk_id, metadata)])
     context = metadata.get("sentence_context")
     if context is None:
-        if "chunk_index" in metadata or "total_chunks" in metadata:
-            raise ConfigError(
-                "This corpus lacks original sentence boundaries. Run cda ingest "
-                "again to re-ingest legacy sources before analyzing them."
-            )
         return split_sentences(document), False
     if not isinstance(context, str) or normalize_text(document) not in context:
         raise ConfigError(
@@ -183,11 +217,6 @@ def _chunk_sentences(chunk_id: str, document: str, metadata: dict) -> tuple[list
             f"but this version uses {SENTENCE_SEGMENTER}, so its sentence positions do not "
             "match. Run cda ingest again (with the same --pdf-dir) to re-ingest the corpus."
         )
-    if "sentence_lengths" not in metadata:
-        raise ConfigError(
-            "This corpus lacks original sentence boundaries. Run cda ingest "
-            "again to re-ingest legacy sources before analyzing them."
-        )
     sentences = _stored_sentences(context, metadata["sentence_lengths"])
     if sentences is None:
         raise ConfigError(
@@ -195,6 +224,13 @@ def _chunk_sentences(chunk_id: str, document: str, metadata: dict) -> tuple[list
             "source with cda ingest --reingest."
         )
     return sentences, True
+
+
+def _merged_window(nearby: dict[int, str], position: int, regex, settings: dict) -> str:
+    """The window for the sentence at ``position`` over the contiguous sentences ``nearby``."""
+    positions = sorted(nearby)
+    windows = sentence_windows([nearby[p] for p in positions], regex, **settings)
+    return next(window for index, window in windows if positions[index] == position)
 
 
 def build_passages(
@@ -213,13 +249,16 @@ def build_passages(
     Overlapping chunks contain the same sentence twice. A (source, sentence
     position) pair is one occurrence; when the two chunks give it different
     context windows (a neighbor sentence lies outside one chunk), the window
-    that contains the other is kept.
+    that contains the other is kept, or, when neither contains the other, the
+    window is rebuilt from the sentences both chunks hold around it.
     """
+    _refuse_legacy_chunks(merged_hits)
     regex = term_regex(term)
     settings = window_settings(config)
 
     pools: dict[bool, list[Passage]] = {True: [], False: []}
-    seen: dict[tuple[str, int], tuple[bool, int]] = {}
+    # (pool, index in pool, {sentence position: sentence} around the term sentence)
+    seen: dict[tuple[str, int], tuple[bool, int, dict[int, str]]] = {}
     stats = {
         "chunks_total": len(merged_hits),
         "chunks_with_term_window": 0,
@@ -254,20 +293,35 @@ def build_passages(
                 metadata=dict(metadata, sentence_index=position, source_identity=identity),
             )
             key = (identity, position)
+            nearby = {
+                position + offset: sentences[sentence_index + offset]
+                for offset in (-1, 0, 1)
+                if 0 <= sentence_index + offset < len(sentences)
+            }
             if key not in seen:
-                seen[key] = (is_researcher, len(pools[is_researcher]))
+                seen[key] = (is_researcher, len(pools[is_researcher]), nearby)
                 pools[is_researcher].append(passage)
                 continue
             stats["overlap_occurrences_removed"] += 1
-            kept_side, kept_index = seen[key]
+            kept_side, kept_index, kept_nearby = seen[key]
             kept = pools[kept_side][kept_index].text
-            if kept_side != is_researcher or (window not in kept and kept not in window):
+            if kept_side != is_researcher or kept_nearby[position] != nearby[position]:
                 raise ConfigError(
                     f"Conflicting overlapping sentence records for {identity!r} at sentence "
                     f"{position}; re-ingest the source with cda ingest --reingest."
                 )
-            if len(window) > len(kept):
-                pools[kept_side][kept_index] = passage
+            merged = {**nearby, **kept_nearby}
+            seen[key] = (kept_side, kept_index, merged)
+            if window in kept or kept in window:
+                if len(window) > len(kept):
+                    pools[kept_side][kept_index] = passage
+                continue
+            # Each chunk cut off a different neighbour (a sentence spanning the
+            # chunk overlap): the window over both chunks' sentences holds both.
+            pools[kept_side][kept_index] = replace(
+                pools[kept_side][kept_index],
+                text=_merged_window(merged, position, regex, settings),
+            )
 
     researcher, literature = pools[True], pools[False]
     stats["researcher_passages"] = len(researcher)

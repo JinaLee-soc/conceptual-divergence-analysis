@@ -143,12 +143,14 @@ def test_fixed_k_kmeans_silhouette_equals_auto_sweep_entry():
 def test_undefined_silhouette_is_none_and_never_selected():
     X, _ = three_blob_matrix()
     assert silhouette(X, np.arange(X.shape[0])) is None
-    # A 2-point evaluation sample can never carry a defined silhouette.
+    # A 1-point evaluation sample, extended by one member of the other
+    # cluster, leaves each evaluated passage its own cluster: undefined.
     labels, k, score, sweep = select_k_by_silhouette(
-        X, max_k=4, **{**SELECT_KWARGS, "silhouette_subsample": 2}
+        X, max_k=2, **{**SELECT_KWARGS, "silhouette_subsample": 1}
     )
     assert labels is None and k == 1 and score is None
     assert sweep and all(entry["silhouette"] is None for entry in sweep)
+    assert all("its own cluster" in entry["silhouette_undefined"] for entry in sweep)
 
 
 def test_degenerate_input_reports_no_score():

@@ -40,7 +40,7 @@ try:
 except ImportError:
     pass
 
-from cda.clustering.order_stability import JOINT, run_trials
+from cda.clustering.order_stability import JOINT, resolution_override_reason, run_trials
 from cda.config import load_config
 from cda.corpus.embeddings import get_embedder
 from cda.corpus.ingest import get_collection
@@ -49,6 +49,7 @@ from cda.pipeline import (
     _clustering_kwargs,
     clustering_mode,
     extract_passages,
+    resolution_params,
     select_literature_by_saturation,
 )
 
@@ -57,18 +58,66 @@ def _labels(results: list[dict]) -> list[str]:
     return ["canonical (cda analyze)"] + [f"shuffle {r['trial']}" for r in results[1:]]
 
 
-def _distribution_table(ks: list[int], canonical_k: int) -> list[str]:
-    """Where the shuffled orderings (ks[1:]) landed; trial 0 is the canonical run."""
-    counts = Counter(ks[1:])
+def _distribution_table(ks: list[int], canonical_k: int, found: list[bool]) -> list[str]:
+    """Where the shuffled orderings (ks[1:]) landed; trial 0 is the canonical run.
+
+    Orderings without a valid partition get their own row: their k is a
+    placeholder, not a landing.
+    """
+    counts = Counter(k for k, ok in zip(ks[1:], found[1:], strict=True) if ok)
+    no_partition = found[1:].count(False)
     shuffles = len(ks) - 1
     lines = ["| k | shuffled orderings landing here | share |", "|---:|---:|---:|"]
-    for k in sorted(set(counts) | {canonical_k}):
-        marker = " ← canonical" if k == canonical_k else ""
+    landed = set(counts) | ({canonical_k} if found[0] else set())
+    for k in sorted(landed):
+        marker = " ← canonical" if found[0] and k == canonical_k else ""
         lines.append(f"| {k} | {counts[k]} | {counts[k] / shuffles:.0%}{marker} |")
+    if no_partition or not found[0]:
+        marker = " ← canonical" if not found[0] else ""
+        lines.append(
+            f"| no valid partition | {no_partition} | {no_partition / shuffles:.0%}{marker} |"
+        )
     return lines
 
 
-def _reading_this(label: str, ks: list[int], sils: list[float], canonical_k: int) -> str:
+def refusal_reason(config) -> str | None:
+    """Why this benchmark must not run under ``config``, or None.
+
+    The canonical trial claims to be what `cda analyze` produced, and the
+    shuffles measure the silhouette k-selection; with clustering.method or
+    clustering.k overriding that selection, both claims would be false.
+    Mirrors the pipeline's built-in check.
+    """
+    return resolution_override_reason(resolution_params(config))
+
+
+def _sil(value: float | None) -> str:
+    return "n/a (no valid partition)" if value is None else f"{value:.4f}"
+
+
+def _sil_range(sils: list[float | None]) -> str:
+    found = [s for s in sils if s is not None]
+    return f"{min(found):.4f}–{max(found):.4f}" if found else "n/a (no valid partition)"
+
+
+def _reading_this(
+    label: str, ks: list[int], sils: list[float | None], canonical_k: int, found: list[bool]
+) -> str:
+    missing = found.count(False)
+    if not found[0]:
+        return (
+            f"No valid {label} partition was found in {missing} of {len(ks)} orderings, "
+            "including the canonical run. There is no cluster structure here to call "
+            "robust or fragile; the k shown is a placeholder, not a result."
+        )
+    missing_note = (
+        f" No valid partition was found in {missing} of {len(ks)} orderings; those "
+        "trials are counted as disagreeing and left out of the silhouette range."
+        if missing
+        else ""
+    )
+    # A trial without a partition is never an agreement (its k is a placeholder).
+    ks = [k if ok else None for k, ok in zip(ks, found, strict=True)]
     counts = Counter(ks[1:])  # trial 0 is the canonical re-run, not a reordering
     shuffles = len(ks) - 1
     if set(ks) == {canonical_k}:
@@ -89,19 +138,24 @@ def _reading_this(label: str, ks: list[int], sils: list[float], canonical_k: int
             "fragile."
         )
     top = max(counts.values())
-    modal = sorted(k for k, n in counts.items() if n == top)
-    modal_text = " / ".join(f"k={k}" for k in modal)
+    modal = sorted((k for k, n in counts.items() if n == top), key=lambda k: (k is None, k))
+    modal_text = " / ".join("no partition" if k is None else f"k={k}" for k in modal)
     agree = "agrees with" if canonical_k in modal else "does NOT match"
     return (
         f"{label.capitalize()} k varied across orderings ({len(set(ks))} distinct values "
-        f"over {len(ks)} trials; silhouette ranged {min(sils):.4f}–{max(sils):.4f}). "
+        f"over {len(ks)} trials; silhouette ranged {_sil_range(sils)}). "
         f"The canonical run's k={canonical_k} {agree} the most common value among "
         f"the shuffled orderings ({modal_text}, {top}/{shuffles} shuffles). This is a "
         "property of the *term* — likely weak cluster separation — not a bug: the "
         "canonical run is still fully reproducible (same order every time), but its "
         "specific k should be read as one plausible partition among several nearby "
         "ones, not as the term's one true register count."
+        f"{missing_note}"
     )
+
+
+def _found(results: list[dict], key: str) -> list[bool]:
+    return [bool(r.get(key, True)) for r in results]
 
 
 def render(term: str, mode: str, n_researcher: int, n_literature: int, results: list[dict]) -> str:
@@ -124,54 +178,58 @@ def render(term: str, mode: str, n_researcher: int, n_literature: int, results: 
     if mode == JOINT:
         ks = [r["k"] for r in results]
         sils = [r["silhouette"] for r in results]
+        found = _found(results, "partition_found")
         canonical_k = ks[0]
         lines += [
             f"**Canonical run** (what `cda analyze` produces today): k={canonical_k}, "
-            f"silhouette={sils[0]:.4f}.",
+            f"silhouette={_sil(sils[0])}.",
             "",
             f"**Across all {trials} orderings:** k ranged {min(ks)}–{max(ks)} "
-            f"({len(set(ks))} distinct values); silhouette ranged {min(sils):.4f}–{max(sils):.4f}.",
+            f"({len(set(ks))} distinct values); silhouette ranged {_sil_range(sils)}; "
+            f"no valid partition in {found.count(False)} of {trials}.",
             "",
-            *_distribution_table(ks, canonical_k),
+            *_distribution_table(ks, canonical_k, found),
             "",
             "| Trial | k | silhouette |",
             "|---|---:|---:|",
         ]
         for label, r in zip(labels, results, strict=True):
-            lines.append(f"| {label} | {r['k']} | {r['silhouette']:.4f} |")
-        lines += ["", "## Reading this", _reading_this("joint", ks, sils, canonical_k)]
+            lines.append(f"| {label} | {r['k']} | {_sil(r['silhouette'])} |")
+        lines += ["", "## Reading this", _reading_this("joint", ks, sils, canonical_k, found)]
     else:
         r_ks = [r["researcher_k"] for r in results]
         r_sils = [r["researcher_silhouette"] for r in results]
         l_ks = [r["literature_k"] for r in results]
         l_sils = [r["literature_silhouette"] for r in results]
+        r_found = _found(results, "researcher_partition_found")
+        l_found = _found(results, "literature_partition_found")
         lines += [
-            f"**Canonical run:** researcher k={r_ks[0]} (silhouette={r_sils[0]:.4f}), "
-            f"literature k={l_ks[0]} (silhouette={l_sils[0]:.4f}). Independent mode "
+            f"**Canonical run:** researcher k={r_ks[0]} (silhouette={_sil(r_sils[0])}), "
+            f"literature k={l_ks[0]} (silhouette={_sil(l_sils[0])}). Independent mode "
             "clusters the two corpora separately, so each has its own stability picture.",
             "",
             "### Researcher corpus",
             "",
-            *_distribution_table(r_ks, r_ks[0]),
+            *_distribution_table(r_ks, r_ks[0], r_found),
             "",
             "### Literature corpus",
             "",
-            *_distribution_table(l_ks, l_ks[0]),
+            *_distribution_table(l_ks, l_ks[0], l_found),
             "",
             "| Trial | researcher k | researcher sil. | literature k | literature sil. |",
             "|---|---:|---:|---:|---:|",
         ]
         for label, r in zip(labels, results, strict=True):
             lines.append(
-                f"| {label} | {r['researcher_k']} | {r['researcher_silhouette']:.4f} "
-                f"| {r['literature_k']} | {r['literature_silhouette']:.4f} |"
+                f"| {label} | {r['researcher_k']} | {_sil(r['researcher_silhouette'])} "
+                f"| {r['literature_k']} | {_sil(r['literature_silhouette'])} |"
             )
         lines += [
             "",
             "## Reading this",
-            _reading_this("researcher", r_ks, r_sils, r_ks[0]),
+            _reading_this("researcher", r_ks, r_sils, r_ks[0], r_found),
             "",
-            _reading_this("literature", l_ks, l_sils, l_ks[0]),
+            _reading_this("literature", l_ks, l_sils, l_ks[0], l_found),
         ]
     return "\n".join(lines) + "\n"
 
@@ -202,11 +260,17 @@ def main() -> int:
 
         demo_dir = find_demo_dir()
         config = demo_config(demo_dir)
-        embedder = get_embedder(config)
-        ensure_toy_corpus_ingested(config, demo_dir, embedder)
     else:
         config = load_config(args.config)
-        embedder = get_embedder(config)
+    reason = refusal_reason(config)
+    if reason:
+        # Refuse before any work: the "canonical (cda analyze)" row would be an
+        # auto-k k-means partition that this config's analyze never produces.
+        print(f"[benchmark] order-stability check not applicable: {reason}.")
+        return 2
+    embedder = get_embedder(config)
+    if args.demo:
+        ensure_toy_corpus_ingested(config, demo_dir, embedder)
 
     collection = get_collection(config)
     researcher, literature, _stats = extract_passages(

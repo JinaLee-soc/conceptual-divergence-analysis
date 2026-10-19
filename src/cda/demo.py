@@ -18,6 +18,9 @@ from cda.corpus.embeddings import get_embedder
 from cda.corpus.ingest import get_collection, ingest_records
 
 TOY_JSONL = "toy_corpus/abstracts.jsonl"
+# The committed demo fixtures were authored in a Claude Code session and are
+# keyed under this name; mock replay falls back to them.
+AUTHORED_FIXTURE_MODEL = "claude-code-session"
 
 
 def find_demo_dir(explicit: str | Path | None = None) -> Path:
@@ -143,6 +146,10 @@ def run_demo(
     ``drafts_dir`` and ``output_dir`` let a caller scope one run's inputs and
     outputs to a directory of its own; the GUI uses this to keep concurrent
     visitors' pasted text and reports apart.
+
+    A mock run replays the fixture recorded under the configured
+    ``llm.model`` (what a live ``record_fixtures`` demo writes) and falls back
+    to the committed authored fixture; the report names whichever it replayed.
     """
     from cda.pipeline import analyze_term  # imported late to keep --help fast
 
@@ -151,7 +158,6 @@ def run_demo(
         directory,
         drafts_dir=drafts_dir,
         output_dir=output_dir,
-        extra_overrides={"llm": {"model": "claude-code-session"}} if mock else None,
     )
     embedder = get_embedder(config)
 
@@ -167,6 +173,7 @@ def run_demo(
         record_fixtures=record_fixtures,
         overwrite_fixtures=overwrite_fixtures,
         fixtures_dir=directory / "fixtures",
+        fallback_fixture_models=(AUTHORED_FIXTURE_MODEL,) if mock else (),
         embedder=embedder,
         return_passages=return_passages,
         draft_texts=draft_texts,
