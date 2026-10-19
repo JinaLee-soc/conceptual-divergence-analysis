@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Corpus integrity during recovery and cleanup
+
+- Corpus operations stop with recovery advice when the filesystem cannot
+  provide an OS lock. The PID-only fallback could admit concurrent operations
+  while recovering a stale lock, so it has been removed.
+- A failed PDF refresh retains its previous version even when an identical
+  copy is scheduled for removal. Missing, excluded, and alias cleanup
+  candidates cannot serve as the replacement that permits deletion.
+- Selection, migration, and pruning share canonical routes for external
+  folder links. Adding an earlier link no longer lets an old route keep an
+  excluded PDF in the corpus.
+
 ### Lock portability and symlink-route retention
 
 - The public demo no longer renders the pipeline's skip reason, which names
@@ -13,9 +25,8 @@ All notable changes to this project are documented here. The format follows
   now; please retry." The local app still shows the full text.
 - The live log in the local app streams every line again; only the public
   demo collapses repeated stage labels.
-- Corpus operations no longer fail on filesystems that refuse OS file locks
-  (some NFS, SMB, FUSE and container mounts): CDA says so once and serializes
-  runs through the `.ingest.lock` PID file alone, as earlier versions did.
+- The initial PID-only fallback for filesystems without OS locks was removed
+  by the corpus-integrity repair above; those operations now stop safely.
 - The `.ingest.guard` file is created world-readable (umask applies) and
   opened read-only, so other OS users of a shared corpus can lock it; a guard
   that cannot be opened is reported with its owner and the `chmod` to run.

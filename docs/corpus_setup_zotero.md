@@ -218,9 +218,10 @@ as PID 1) and an entry that is not a readable file. The guard is created
 world-readable (your umask applies) and opened read-only, so other OS users
 of a shared corpus can lock it too; if it was created without read access
 for them, CDA names the file, its owner and the `chmod` to run. On a
-filesystem that refuses OS file locks (some network and container mounts)
-CDA says so once and serializes operations through the `.ingest.lock` PID
-file alone, as earlier versions did.
+filesystem that cannot provide OS file locks, CDA stops before accessing
+the corpus. Use a corpus directory on a filesystem that supports those
+locks, or restore locking support and retry. A PID file alone cannot safely
+coordinate concurrent recovery after a crash.
 
 When an older corpus stores a PDF under a symlink route, CDA migrates it to
 the canonical route. If the canonical file exists but could not be stored
@@ -229,8 +230,11 @@ under its route and reported, whether or not `--prune-missing` is given. If
 the canonical file is gone, the route is a missing source; if the file is
 stored under its own path or elsewhere, the route is a duplicate or an older
 version, reported separately from missing files in the `[done]` line and
-removed by `--prune-missing`. Sources deliberately excluded from the corpus
-can still be pruned.
+removed by `--prune-missing`. A replacement must survive that cleanup: a
+missing or excluded copy, or another alias awaiting cleanup, cannot justify
+deleting the retained source. Sources deliberately excluded from the corpus
+can still be pruned. Selection and pruning use the same canonical route for
+links to external folders as well as links within the PDF root.
 
 Ordinary ingestion refreshes changed chunk settings as well as source text.
 For JSONL ingestion, changes to year, title, DOI, tags, authorship or acquisition

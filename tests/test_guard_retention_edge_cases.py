@@ -1,7 +1,7 @@
 """The corpus guard on hostile filesystems, and alias-route retention accounting.
 
-Regressions for: a filesystem that refuses ``flock`` failing every corpus
-operation, a guard another OS user cannot open, a lock record carrying this
+Regressions for: a filesystem that refuses ``flock`` stopping corpus
+operations safely, a guard another OS user cannot open, a lock record carrying this
 very pid (a container's PID 1) that was never stale, a lock entry that is not
 a readable file stalling every caller, and a source stored under a symlink
 route being retained forever (counted as a kept previous version, never
@@ -60,11 +60,6 @@ def fast_lock(monkeypatch):
 
 
 @pytest.fixture
-def fresh_fallback_note(monkeypatch):
-    monkeypatch.setattr(ing, "_guard_fallback_noted", set(), raising=False)
-
-
-@pytest.fixture
 def live_holder():
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -81,35 +76,31 @@ def _failing_flock(code):
     return flock
 
 
-# --- A1: a filesystem without flock falls back to the PID file ---------------
+# --- A1: a filesystem without flock stops before touching the corpus --------
 
 
 @posix_only
-@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL])
-def test_unsupported_flock_falls_back_to_the_pid_file_with_one_note(
-    tmp_path, fast_lock, fresh_fallback_note, monkeypatch, code
+@pytest.mark.parametrize("code", sorted(ing._GUARD_UNSUPPORTED))
+def test_unsupported_flock_refuses_the_operation_with_recovery_advice(
+    tmp_path, fast_lock, monkeypatch, code
 ):
     import fcntl
 
     config = _config(tmp_path)
     lock = _lock_file(config)
     monkeypatch.setattr(fcntl, "flock", _failing_flock(code))
-    messages: list[str] = []
-    with corpus_lock(config, messages.append):
-        assert lock.read_text().strip() == str(os.getpid())
-    with corpus_lock(config, messages.append):
-        pass
-    notes = [m for m in messages if "does not support OS file locks" in m]
-    assert len(notes) == 1  # announced once per process, not per operation
-    assert errno.errorcode[code] in notes[0] and ".ingest.guard" in notes[0]
+    with pytest.raises(CorpusLockError, match="Cannot safely lock") as excinfo:
+        with corpus_lock(config, _quiet):
+            pytest.fail("corpus operation started without the OS guard")
+    message = str(excinfo.value)
+    assert errno.errorcode[code] in message and ".ingest.guard" in message
+    assert "filesystem that supports OS file locks" in message
     assert not lock.exists()
 
 
 @posix_only
-def test_fallback_still_waits_on_a_record_of_this_pid(
-    tmp_path, fast_lock, fresh_fallback_note, monkeypatch
-):
-    """Without the guard, a record of this pid may belong to another thread here."""
+def test_unsupported_guard_leaves_a_record_of_this_pid_untouched(tmp_path, fast_lock, monkeypatch):
+    """Do not reclaim any PID record when the guard cannot be acquired."""
     import fcntl
 
     config = _config(tmp_path)
@@ -123,18 +114,17 @@ def test_fallback_still_waits_on_a_record_of_this_pid(
 
 
 @posix_only
-def test_fallback_does_not_leave_the_guard_half_open(
-    tmp_path, fast_lock, fresh_fallback_note, monkeypatch
-):
+def test_unsupported_guard_does_not_leave_its_descriptor_open(tmp_path, fast_lock, monkeypatch):
     import fcntl
 
     config = _config(tmp_path)
     real_flock = fcntl.flock
     with monkeypatch.context() as patch:
         patch.setattr(fcntl, "flock", _failing_flock(errno.ENOLCK))
-        with corpus_lock(config, _quiet):
-            pass
-    # The fallback acquisition closed its descriptor: a real flock succeeds now.
+        with pytest.raises(CorpusLockError):
+            with corpus_lock(config, _quiet):
+                pytest.fail("corpus operation started without the OS guard")
+    # The failed acquisition closed its descriptor: a real flock succeeds now.
     fd = os.open(_guard_file(config), os.O_RDONLY)
     try:
         real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -156,8 +146,8 @@ def test_other_flock_errors_still_raise(tmp_path, fast_lock, monkeypatch):
 
 
 @posix_only
-def test_cli_ingests_on_a_filesystem_without_flock(
-    tmp_path, fast_lock, fresh_fallback_note, fake_embedder, monkeypatch, capsys
+def test_cli_reports_unsupported_locking_before_creating_a_store(
+    tmp_path, fast_lock, fake_embedder, monkeypatch, capsys
 ):
     import fcntl
 
@@ -169,10 +159,10 @@ def test_cli_ingests_on_a_filesystem_without_flock(
     (library / "paper.pdf").write_text("Novelty survives a network share.")
     code = main(["ingest", "--pdf-dir", str(library), "--corpus-dir", str(tmp_path / "corpus")])
     captured = capsys.readouterr()
-    assert code == 0, captured.err
+    assert code == 1
     assert "Traceback" not in captured.err
-    assert "does not support OS file locks" in captured.out + captured.err
-    assert _stored(_config(tmp_path)) == {"paper.pdf"}
+    assert "Cannot safely lock" in captured.err
+    assert not (ing._store_directory(_config(tmp_path)) / "chroma.sqlite3").exists()
 
 
 # --- A2: the guard is shareable between OS users ------------------------------
@@ -337,9 +327,7 @@ def test_unmovable_lock_directory_is_reported_by_name(tmp_path, fast_lock, monke
 
 
 @posix_only
-def test_unreadable_lock_entry_is_waited_on_without_the_guard(
-    tmp_path, fast_lock, fresh_fallback_note, monkeypatch
-):
+def test_unreadable_lock_entry_is_untouched_without_the_guard(tmp_path, fast_lock, monkeypatch):
     import fcntl
 
     config = _config(tmp_path)
