@@ -46,6 +46,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install CPU-only PyTorch
+        # The tests never use a GPU; the default Linux wheels pull several GB
+        # of CUDA libraries and can exhaust the runner's disk.
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Install package
         # gui extra included: without streamlit/altair the offline GUI tests
         # (including the network-scope-footer guard) silently skip.
