@@ -19,6 +19,7 @@ import sys
 import unicodedata
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import cda.corpus.ingest as ing
@@ -58,6 +59,13 @@ def _rows(config, relpath: str) -> list[tuple[str, list[float]]]:
     )
     order = sorted(range(len(result["ids"])), key=lambda i: result["metadatas"][i]["chunk_index"])
     return [(result["documents"][i], [float(x) for x in result["embeddings"][i]]) for i in order]
+
+
+def _assert_same_rows(actual, expected) -> None:
+    """Same documents in the same chunk order; embeddings equal at float32 store precision."""
+    assert [doc for doc, _ in actual] == [doc for doc, _ in expected]
+    for (_, got), (_, want) in zip(actual, expected, strict=True):
+        assert np.allclose(got, want, rtol=1e-6, atol=1e-7)
 
 
 def _done(messages: list[str]) -> str:
@@ -276,7 +284,7 @@ def test_earlier_link_moves_sources_without_re_extraction_or_re_embedding(
     assert stats["chunks_added"] == 0
     assert _stored(config) == {"a/x.pdf", "a/y.pdf", "a/z.pdf", "z_local.pdf"}
     for name in "xyz":
-        assert _rows(config, f"a/{name}.pdf") == before[name]
+        _assert_same_rows(_rows(config, f"a/{name}.pdf"), before[name])
     rows = get_collection(config).get(where={"pdf_relpath": "a/x.pdf"}, include=["metadatas"])
     assert all(i.startswith(ing._relpath_key("a/x.pdf") + "::") for i in rows["ids"])
     assert all(m["title"] == "X paper" for m in rows["metadatas"])
@@ -298,7 +306,7 @@ def test_earlier_link_moves_sources_without_re_extraction_or_re_embedding(
         "moved from route a/ to route b/" in m and "no longer on disk" in m for m in messages
     )
     for name in "xyz":
-        assert _rows(config, f"b/{name}.pdf") == before[name]
+        _assert_same_rows(_rows(config, f"b/{name}.pdf"), before[name])
 
 
 def test_unchanged_file_stored_under_a_link_route_is_rekeyed_without_reading_it(
@@ -323,7 +331,7 @@ def test_unchanged_file_stored_under_a_link_route_is_rekeyed_without_reading_it(
     messages: list[str] = []
     stats = ing.ingest_pdf_dir(config, fake_embedder, root, progress=messages.append)
     assert _stored(config) == {"real/x.pdf", "y.pdf"}
-    assert _rows(config, "real/x.pdf") == before
+    _assert_same_rows(_rows(config, "real/x.pdf"), before)
     assert stats["pdfs_renamed"] == 1 and stats["pdfs_moved"] == 1
     assert stats["pdfs_unreadable"] == 0 and stats["pdfs_kept_previous"] == 0
     assert not any("retained" in m for m in messages)
