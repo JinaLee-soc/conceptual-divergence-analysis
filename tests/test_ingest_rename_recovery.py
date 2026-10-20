@@ -132,3 +132,59 @@ def test_failed_properties_keep_the_old_copy_and_continue(
     stats = ing.ingest_pdf_dir(config, fake_embedder, root, prune_missing=prune, progress=_quiet)
     assert stats["pdfs_unreadable"] == 0
     assert {m["pdf_relpath"] for m in _rows(config)["metadatas"]} == {"aa.pdf", "zz.pdf"}
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "no_text", "segmentation"])
+@pytest.mark.parametrize("rebuild", ["reingest", "chunk_settings"])
+def test_failed_rebuild_of_a_rename_keeps_the_old_copy_under_prune(
+    tmp_path, monkeypatch, library, fake_embedder, failure, rebuild
+):
+    # A rename that cannot reuse the stored chunks (--reingest, or new chunk
+    # settings) is rebuilt from the file; when that rebuild fails, the old
+    # name is the document's only stored version and must survive pruning.
+    root, config = library
+    old = root / "original.pdf"
+    old.write_text("Novelty has an earlier stored meaning. " * 30)
+    ing.ingest_pdf_dir(config, fake_embedder, root, progress=_quiet)
+    before = _rows(config)
+    old.rename(root / "aa.pdf")
+    reingest = rebuild == "reingest"
+    if not reingest:
+        config = load_config(
+            overrides={
+                "paths": {"corpus_dir": str(tmp_path / "corpus")},
+                "corpus": {"chunk_size_words": 400},
+            }
+        )
+    real_extract, real_segment = ing.extract_pdf_text, ing.sentence_context_records
+
+    def broken_extract(path):
+        raise ValueError("extractor failed")
+
+    def broken_segment(*_args):
+        raise ValueError("Sentence segmentation did not cover the text.")
+
+    if failure == "unreadable":
+        monkeypatch.setattr(ing, "extract_pdf_text", broken_extract)
+    elif failure == "no_text":
+        monkeypatch.setattr(ing, "extract_pdf_text", lambda path: "")
+    else:
+        monkeypatch.setattr(ing, "sentence_context_records", broken_segment)
+    stats = ing.ingest_pdf_dir(
+        config, fake_embedder, root, reingest=reingest, prune_missing=True, progress=_quiet
+    )
+    assert stats["pdfs_pruned"] == 0
+    assert stats["pdfs_kept_previous"] == 1
+    old_rows = ing.get_collection(config).get(
+        where={"pdf_relpath": "original.pdf"}, include=["documents", "metadatas", "embeddings"]
+    )
+    assert old_rows["ids"] == before["ids"]
+    assert old_rows["documents"] == before["documents"]
+    assert np.array_equal(old_rows["embeddings"], before["embeddings"])
+    monkeypatch.setattr(ing, "extract_pdf_text", real_extract)
+    monkeypatch.setattr(ing, "sentence_context_records", real_segment)
+    stats = ing.ingest_pdf_dir(
+        config, fake_embedder, root, reingest=reingest, prune_missing=True, progress=_quiet
+    )
+    assert stats["pdfs_ingested"] == 1 and stats["pdfs_renamed"] == 1
+    assert {m["pdf_relpath"] for m in _rows(config)["metadatas"]} == {"aa.pdf"}

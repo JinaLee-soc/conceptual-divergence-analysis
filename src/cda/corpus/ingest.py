@@ -1842,11 +1842,28 @@ def ingest_pdf_dir(
                 continue
             if reason:
                 progress(f"  [ingest] {rel_name}: {reason}; re-ingesting it whole")
+            # A renamed file's old copies are the document's only stored version
+            # when nothing remains under this name or a link route to it. If the
+            # rebuild below fails, they are then kept out of the missing sources
+            # --prune-missing removes, as the re-key path keeps them; a stored
+            # link route is retained by the symlink-route check instead.
+            sole_copies = (
+                renamed
+                if renamed
+                and state in ("absent", "partial")
+                and not any(
+                    name != rel_name and index.canonical(name) == rel_name
+                    for name, info in stored_sources.items()
+                    if info["pdf_root"] == pdf_root
+                )
+                else []
+            )
             try:
                 raw_text = extract_pdf_text(pdf_path)
                 acquisition_date = file_acquisition_date(pdf_path)
             except Exception as exc:  # any extractor failure makes this one file unreadable
                 stats["pdfs_unreadable"] += 1
+                failed_renames.update(sole_copies)
                 unreadable.append(rel_name + _failed_refresh(collection, rel_name, state, stats))
                 progress(
                     f"  [ingest] {rel_name}: could not be read ({type(exc).__name__}: {exc}); "
@@ -1858,6 +1875,7 @@ def ingest_pdf_dir(
             chunks = chunk_words(text, chunk_size, chunk_overlap)
             if not chunks:
                 stats["pdfs_no_text"] += 1
+                failed_renames.update(sole_copies)
                 _failed_refresh(collection, rel_name, state, stats)
                 progress(
                     f"  [ingest] {rel_name}: no extractable text (a scan without OCR?); "
@@ -1868,6 +1886,7 @@ def ingest_pdf_dir(
                 contexts = sentence_context_records(text, chunk_size, chunk_overlap, len(chunks))
             except ValueError as exc:
                 stats["pdfs_unreadable"] += 1
+                failed_renames.update(sole_copies)
                 unreadable.append(rel_name + _failed_refresh(collection, rel_name, state, stats))
                 progress(f"  [ingest] {rel_name}: {exc} " + _failed_refresh_note(state))
                 continue
