@@ -54,7 +54,7 @@ def _endorse_then_merge(tmp_path, embedder):
     return session_dir, session
 
 
-# --- A6: an applied edit withdraws the endorsement ------------------------
+# --- an applied edit withdraws the endorsement ------------------------
 
 
 def test_applied_merge_withdraws_the_endorsement(tmp_path, anchored_embedder):
@@ -169,7 +169,7 @@ def test_gui_offers_endorse_again_after_an_edit(tmp_path, anchored_embedder):
     assert any("was withdrawn" in w.value for w in app.warning)
 
 
-# --- C4: alert severities are distinguishable without colour ---------------
+# --- alert severities are distinguishable without colour ---------------
 
 
 def _alert_rules(css: str) -> dict[str, str]:
@@ -197,7 +197,7 @@ def test_alert_kinds_have_distinct_borders_and_text_labels():
         ), f"no text label for {kind} alerts"
 
 
-# --- C5: the public demo never shows host paths --------------------------
+# --- the public demo never shows host paths --------------------------
 
 
 @pytest.fixture
@@ -300,7 +300,7 @@ def test_live_demo_rerun_replaces_this_machines_recording(monkeypatch):
     assert kwargs["record_fixtures"] is True and kwargs["overwrite_fixtures"] is True
 
 
-# --- E1: `cda diagnose --demo` on a fresh clone --------------------------
+# --- `cda diagnose --demo` on a fresh clone --------------------------
 
 
 def test_diagnose_demo_builds_the_toy_corpus_first(tmp_path, monkeypatch, capsys, fake_embedder):
@@ -323,7 +323,7 @@ def test_diagnose_demo_builds_the_toy_corpus_first(tmp_path, monkeypatch, capsys
     assert (tmp_path / "demo" / "_runtime" / "corpus").is_dir()
 
 
-# --- A5/E1: CI workflows ----------------------------------------------------
+# --- CI workflows ----------------------------------------------------
 
 
 def _workflow(name: str) -> dict:

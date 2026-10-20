@@ -76,7 +76,7 @@ def _failing_flock(code):
     return flock
 
 
-# --- A1: a filesystem without flock stops before touching the corpus --------
+# --- a filesystem without flock stops before touching the corpus --------
 
 
 @posix_only
@@ -167,7 +167,7 @@ def test_cli_reports_unsupported_locking_before_creating_a_store(
     assert not (ing._store_directory(_config(tmp_path)) / "chroma.sqlite3").exists()
 
 
-# --- A2: the guard is shareable between OS users ------------------------------
+# --- the guard is shareable between OS users ------------------------------
 
 
 @posix_only
@@ -214,7 +214,7 @@ def test_unopenable_guard_is_reported_with_the_fix(tmp_path, fast_lock):
     assert "0000" in message
 
 
-# --- A3: a record of this very pid is stale once the guard is held -----------
+# --- a record of this very pid is stale once the guard is held -----------
 
 
 def test_record_of_this_pid_is_reclaimed_at_once(tmp_path, fast_lock):
@@ -246,7 +246,7 @@ def test_record_of_another_live_pid_is_still_waited_on(tmp_path, fast_lock, live
     assert lock.read_text().strip() == str(live_holder)
 
 
-# --- B1: a lock entry that is not a readable file ----------------------------
+# --- a lock entry that is not a readable file ----------------------------
 
 
 def _age(path: Path, seconds: float) -> None:
@@ -343,7 +343,7 @@ def test_unreadable_lock_entry_is_untouched_without_the_guard(tmp_path, fast_loc
     assert lock.is_dir()
 
 
-# --- A4/A5/B3: sources stored under a symlink route ---------------------------
+# --- sources stored under a symlink route ---------------------------
 
 
 @pytest.fixture

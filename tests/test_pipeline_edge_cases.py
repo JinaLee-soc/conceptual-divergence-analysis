@@ -1,8 +1,5 @@
 """Edge cases in grounding, the audit parser, verification, config validation,
 fixture replay, output installation, provenance and the passage-map palettes.
-
-Symbols added by these fixes are imported inside the tests that need them, so
-each test fails on its own when the behaviour is missing.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from cda.registers.grounding import check_quotations
 from cda.registers.verify import extract_register_structure
 from cda.types import ClusterSummary, JointClustering
 
-# ---- A4: quote nesting in non-Latin text -----------------------------------
+# ---- quote nesting in non-Latin text -----------------------------------
 
 PROMPT = (
     "LITERATURE PASSAGES (cluster summary):\n"
@@ -83,7 +80,7 @@ def test_spaced_closing_mark_before_an_attribution_is_not_ambiguous():
     assert _result(body)[2] == 0
 
 
-# ---- D6: grounding false-unverified cases ----------------------------------
+# ---- grounding false-unverified cases ----------------------------------
 
 
 def test_source_filename_containing_a_bracket_is_parsed():
@@ -121,7 +118,7 @@ def test_unverified_curly_pair_lists_its_inner_marks_without_counting_them_unpai
     assert result["unpaired_marks"] == 0
 
 
-# ---- D7: elided quotes ------------------------------------------------------
+# ---- elided quotes ------------------------------------------------------
 
 
 def test_ellipsis_tokens_do_not_count_toward_the_word_minimum():
@@ -140,7 +137,7 @@ def test_elided_quote_with_substantive_fragments_still_verifies():
     assert _result(body) == (1, 1, 0, 0)
 
 
-# ---- C2: audit negations and the register table -----------------------------
+# ---- audit negations and the register table -----------------------------
 
 _FIELD = "- **k-means/LLM mapping:** "
 
@@ -196,7 +193,7 @@ def test_table_without_a_register_column_says_so():
     assert any("no column headed 'register'" in note for note in notes)
 
 
-# ---- C3: distance ratings ---------------------------------------------------
+# ---- distance ratings ---------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -215,7 +212,7 @@ def test_distance_ratings_follow_a_label(line, ratings):
     assert extract_register_structure(line)["distance_ratings"] == ratings
 
 
-# ---- B3, D5, D9: settings refused before retrieval -------------------------
+# ---- settings refused before retrieval -------------------------
 
 
 class _Untouchable:
@@ -297,7 +294,7 @@ def test_max_window_chars_message_names_the_real_constraint(tmp_path):
     assert "below retrieval.min_window_chars (0)" not in message
 
 
-# ---- A5: mock replay prefers the configured model's recording --------------
+# ---- mock replay prefers the configured model's recording --------------
 
 
 def _fixture(directory, model: str, system: str, user: str, response: str) -> None:
@@ -361,7 +358,7 @@ def test_mock_demo_keeps_the_configured_model_and_falls_back_to_the_authored_one
     assert tuple(captured["fallbacks"]) == ("claude-code-session",)
 
 
-# ---- B6: install_new without hard links -------------------------------------
+# ---- install_new without hard links -------------------------------------
 
 
 @pytest.mark.parametrize("code", [errno.EPERM, errno.ENOTSUP, errno.EXDEV, errno.EMLINK])
@@ -394,7 +391,7 @@ def test_install_new_propagates_other_link_errors(tmp_path, monkeypatch):
     assert not (tmp_path / "report.md").exists()
 
 
-# ---- D8: embedding provenance -----------------------------------------------
+# ---- embedding provenance -----------------------------------------------
 
 
 def test_short_model_alias_resolves_like_sentence_transformers():
@@ -455,7 +452,7 @@ def test_embedding_identity_ignores_snapshot_extras_and_status_text():
     assert _embedding_identity(base) != _embedding_identity(changed)
 
 
-# ---- E2: passage-map palettes -----------------------------------------------
+# ---- passage-map palettes -----------------------------------------------
 
 
 def _rgb(colour: str) -> np.ndarray:

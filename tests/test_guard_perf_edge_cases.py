@@ -118,7 +118,7 @@ def _guard_open_flags(monkeypatch) -> list[int]:
     return flags_seen
 
 
-# --- A1: a guard that NFS refuses to lock read-only -------------------------
+# --- a guard that NFS refuses to lock read-only -------------------------
 
 
 @posix_only
@@ -177,7 +177,7 @@ def test_guard_without_write_permission_falls_back_to_read_only_and_locks(
     assert f"chmod a+w {guard}" in message
 
 
-# --- A2: an unchanged rerun is linear in the number of folders --------------
+# --- an unchanged rerun is linear in the number of folders --------------
 
 
 def _zotero_style_library(root: Path, n: int) -> int:
@@ -241,7 +241,7 @@ def test_exact_matching_holds_through_the_listing_cache(tmp_path, monkeypatch):
     assert calls["n"] == 2
 
 
-# --- A3: a route change moves sources without re-extraction or re-embedding --
+# --- a route change moves sources without re-extraction or re-embedding --
 
 
 def _external_library(tmp_path: Path) -> tuple[Path, Path]:
@@ -351,7 +351,7 @@ def test_changed_file_under_a_link_route_is_still_rebuilt(tmp_path, fake_embedde
     assert stats["pdfs_aliased"] == 1  # b/x.pdf: an older version under the old route
 
 
-# --- B1: a timeout with no PID file names the guard and advises nothing -------
+# --- a timeout with no PID file names the guard and advises nothing -------
 
 _HOLD_GUARD = """
 import fcntl, os, sys, time
@@ -388,7 +388,7 @@ def test_timeout_behind_a_guard_only_holder_names_the_guard(tmp_path, monkeypatc
     assert "nothing to remove" in message
 
 
-# --- B2: a refused lock says what exists and leaves nothing that passes for a corpus --
+# --- a refused lock says what exists and leaves nothing that passes for a corpus --
 
 
 @posix_only
@@ -420,7 +420,7 @@ def test_an_existing_store_is_opened_by_its_store_file(tmp_path, fake_embedder):
     assert get_collection(config).count() > 0
 
 
-# --- C2: the [done] line counts previous versions kept, not "failed files" ---
+# --- the [done] line counts previous versions kept, not "failed files" ---
 
 
 def test_done_line_counts_previous_versions_kept(tmp_path, fake_embedder, text_pdfs, monkeypatch):

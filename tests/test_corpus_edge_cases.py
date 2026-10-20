@@ -68,7 +68,7 @@ def _literature(config, term: str, mywork: dict | None = None):
     return build_passages(term, hits, mywork_classifier(mywork or {}), config)
 
 
-# --- A1. exclude patterns match decomposed folder names ----------------------
+# --- exclude patterns match decomposed folder names ----------------------
 
 
 def test_nfc_exclude_pattern_skips_an_nfd_folder_before_ingest(tmp_config, fake_embedder, library):
@@ -94,7 +94,7 @@ def test_exclusion_compares_paths_and_patterns_in_nfc():
     assert ing._is_excluded(Path("Été") / "a.pdf", [NFD + "/"])
 
 
-# --- A2. MyWork filename patterns match decomposed names ---------------------
+# --- MyWork filename patterns match decomposed names ---------------------
 
 
 def test_pdf_filename_is_stored_nfc(tmp_config, fake_embedder, library):
@@ -112,7 +112,7 @@ def test_filename_pattern_matches_nfd_names_and_ignores_case():
     assert not classify("other.pdf", {})[0]
 
 
-# --- A3. sources stored before PDF roots were recorded -----------------------
+# --- sources stored before PDF roots were recorded -----------------------
 
 
 def _strip_roots_and_boundaries(config, *, boundaries: bool) -> None:
@@ -169,7 +169,7 @@ def test_legacy_chunk_error_names_every_affected_source():
         build_passages("novelty", hits, mywork_classifier({}), load_config())
 
 
-# --- A7. phrases typed with a double space or a no-break space ---------------
+# --- phrases typed with a double space or a no-break space ---------------
 
 
 @pytest.mark.parametrize("term", ["Matthew  effect", "Matthew\u00a0effect", " Matthew effect "])
@@ -190,7 +190,7 @@ def test_literal_filter_allows_any_whitespace_between_words():
     assert literal_filter("Matthew\u00a0 effect") == {"$regex": r"(?i)Matthew\s+effect"}
 
 
-# --- B1. context windows over a sentence spanning the chunk overlap ---------
+# --- context windows over a sentence spanning the chunk overlap ---------
 
 
 def test_context_window_over_chunk_overlap_is_the_union(tmp_path, fake_embedder):
@@ -210,7 +210,7 @@ def test_context_window_over_chunk_overlap_is_the_union(tmp_path, fake_embedder)
     assert stats["overlap_occurrences_removed"] == 1
 
 
-# --- B2. an unreadable folder holding a stored source ------------------------
+# --- an unreadable folder holding a stored source ------------------------
 
 
 @pytest.mark.skipif(
@@ -238,7 +238,7 @@ def test_unreadable_folder_is_reported_not_pruned_or_renamed(tmp_config, fake_em
     assert any(m.startswith("[done]") for m in messages)
 
 
-# --- B5. hidden files in the drafts directory --------------------------------
+# --- hidden files in the drafts directory --------------------------------
 
 
 def test_hidden_and_appledouble_drafts_are_skipped_with_a_note(tmp_path):
@@ -254,7 +254,7 @@ def test_hidden_and_appledouble_drafts_are_skipped_with_a_note(tmp_path):
     assert any("skipped 2 hidden file(s)" in m for m in messages)
 
 
-# --- C6. a PDF export with running heads is a near-duplicate -----------------
+# --- a PDF export with running heads is a near-duplicate -----------------
 
 
 def _pdf_export(path: Path, words: list[str], *, head: str = "NOVELTY AND RECOGNITION") -> None:
@@ -308,7 +308,7 @@ def test_strip_running_lines_keeps_lines_seen_on_fewer_pages():
     ]
 
 
-# --- C7. generic library titles do not make every title match ambiguous -----
+# --- generic library titles do not make every title match ambiguous -----
 
 
 def test_generic_titles_are_not_title_keys():
@@ -320,7 +320,7 @@ def test_generic_titles_are_not_title_keys():
     assert match_by_content(opening, {}, index) == (distinctive, "title")
 
 
-# --- C8. CJK sentences and blocks --------------------------------------------
+# --- CJK sentences and blocks --------------------------------------------
 
 
 def test_cjk_full_stops_end_sentences_without_a_space():
@@ -362,7 +362,7 @@ def test_segmenter_identity_marks_cjk_segmentation():
     assert windows.SENTENCE_SEGMENTER == f"pysbd-{pysbd.__version__}+blocks-v3"
 
 
-# --- D1. date bounds ----------------------------------------------------------
+# --- date bounds ----------------------------------------------------------
 
 
 def test_one_digit_hour_bound_is_zero_padded():
@@ -378,7 +378,7 @@ def test_am_pm_and_zone_names_are_refused(value):
         parse_bound(value, end_of_day=True)
 
 
-# --- D2. Windows paths in a Zotero export ------------------------------------
+# --- Windows paths in a Zotero export ------------------------------------
 
 
 def test_windows_attachment_paths_give_the_file_basename(tmp_path):
@@ -391,7 +391,7 @@ def test_windows_attachment_paths_give_the_file_basename(tmp_path):
     assert load_zotero_csv(export, progress=_quiet)[0].attachment_keys == ["smith2020"]
 
 
-# --- D3. docx list markers and hyperlinks ------------------------------------
+# --- docx list markers and hyperlinks ------------------------------------
 
 _W = (
     'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -470,7 +470,7 @@ def test_docx_list_markers_and_hyperlink_markup_are_removed_typed_html_kept(tmp_
     ]
 
 
-# --- D4. symlinked folders, Japanese marks, CJK title messages ---------------
+# --- symlinked folders, Japanese marks, CJK title messages ---------------
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privileges")
@@ -501,7 +501,7 @@ def test_cjk_title_error_counts_usable_words_without_blaming_latin_words():
     assert "Latin" not in message
 
 
-# --- D11. Zotero summary of an unchanged rerun -------------------------------
+# --- Zotero summary of an unchanged rerun -------------------------------
 
 
 def test_zotero_summary_counts_unchanged_sources(tmp_config, fake_embedder, library, tmp_path):

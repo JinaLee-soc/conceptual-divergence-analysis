@@ -55,7 +55,7 @@ def _skipped_demo(**kwargs):
     }
 
 
-# --- B2: a skipped demo run never names the host --------------------------
+# --- a skipped demo run never names the host --------------------------
 
 
 def test_public_demo_skip_notice_names_no_host_path(monkeypatch):
@@ -120,7 +120,7 @@ def test_public_lock_failure_is_generic_whatever_its_cause(monkeypatch, detail, 
     assert "/srv/" not in _page_text(app)
 
 
-# --- C1: the local log streams repeats; the public log collapses labels ----
+# --- the local log streams repeats; the public log collapses labels ----
 
 
 def _repeating_demo(**kwargs):

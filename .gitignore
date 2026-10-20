@@ -3,16 +3,10 @@
 *.env
 !.env.example
 
-# User data — never commit (ground rule: no real corpus data in this repo).
-# Patterns are ROOT-ANCHORED (leading slash) on purpose: unanchored
-# `corpus/` would also ignore src/cda/corpus/ and `drafts/` would ignore
-# demo/toy_corpus/drafts/ — which silently broke fresh clones once.
-# The directories themselves ship (via .gitkeep) so `docker compose up` on
-# Linux binds existing user-owned dirs instead of having the daemon create
-# them root-owned, which failed the first Ingest (or a paid Analyze) with a
-# raw PermissionError. That removes the root-owned case only: the container
-# still writes as uid 1000 by default, so a Linux account with a different
-# uid needs the CDA_UID/CDA_GID override documented in docker-compose.yml.
+# User data. Root-anchored patterns keep src/cda/corpus/ and the toy drafts tracked.
+# .gitkeep files provide user-owned directories for Docker bind mounts.
+# Linux users whose uid differs from 1000 need the CDA_UID/CDA_GID settings
+# documented in docker-compose.yml.
 /corpus/*
 !/corpus/.gitkeep
 /drafts/*

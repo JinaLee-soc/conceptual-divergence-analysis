@@ -1,16 +1,8 @@
 """The public demo tells a visitor to retry only when a retry can help.
 
-Regression for B3: every ``CorpusLockError`` used to render as "The demo
-cannot reach its corpus right now; please retry." on the public demo. That
-is wrong for the permanent refusals: a filesystem that cannot provide an OS
-lock ("Cannot safely lock the corpus …"), a guard file the server process
-cannot open for permission reasons (the text names the file and a ``chmod``),
-or a lock entry that could not be moved aside. Those need the operator, not
-a retry, and their texts name files on the host. Local mode keeps the full
-exception text, which is the detail a researcher needs.
-
-``CDA_GUI_APP_PATH`` points the tests at another copy of ``gui/app.py`` so
-the same file can be run against the pre-fix app to show it failing.
+Unsupported OS locks, unreadable guards and lock entries that cannot be
+moved require operator action. Public messages omit host paths; local mode
+keeps the full exception text. ``CDA_GUI_APP_PATH`` selects the app to test.
 """
 
 from __future__ import annotations

@@ -55,7 +55,7 @@ def linked_library(tmp_path):
     return root
 
 
-# --- A1: exclusion is decided on the canonical route -------------------------
+# --- exclusion is decided on the canonical route -------------------------
 
 
 def test_link_route_cannot_keep_an_excluded_pdf(linked_library):
@@ -200,7 +200,7 @@ def test_source_stored_under_a_link_route_is_pruned_when_its_file_is_excluded(
     assert stats["pdfs_pruned"] == 1 and stats["pdfs_stored_excluded"] == 1
 
 
-# --- A2: a lock left by a dead process is reclaimed; a live one is waited on --
+# --- a lock left by a dead process is reclaimed; a live one is waited on --
 
 
 def _dead_pid() -> int:
@@ -319,7 +319,7 @@ def test_cli_reports_a_held_lock_without_a_traceback(
     assert "error:" in err and "ingest.lock" in err and "Traceback" not in err
 
 
-# --- B2: the demo creates its store under the lock ---------------------------
+# --- the demo creates its store under the lock ---------------------------
 
 
 def _toy_demo_dir(tmp_path, n_records=4) -> Path:
@@ -374,7 +374,7 @@ def test_concurrent_first_demo_runs_create_the_store_under_the_lock(
     assert not lock.exists()
 
 
-# --- B1: the demo streams its progress and surfaces a lock timeout -----------
+# --- the demo streams its progress and surfaces a lock timeout -----------
 
 
 def test_run_demo_streams_every_line_to_the_progress_callback(
@@ -471,7 +471,7 @@ def test_gui_public_demo_names_a_lock_timeout_without_the_host_path(monkeypatch)
     assert "The demo failed on this server" not in errors
 
 
-# --- B3: --session compares terms the way result lookup does -----------------
+# --- --session compares terms the way result lookup does -----------------
 
 
 def test_validate_session_matches_its_term_by_identity(tmp_path, capsys, monkeypatch):
@@ -507,7 +507,7 @@ def test_validate_session_matches_its_term_by_identity(tmp_path, capsys, monkeyp
     assert "is for term 'ai', not 'A.I.'" in err and "--term 'ai'" in err
 
 
-# --- C1: a capped keyword read names every legacy source ---------------------
+# --- a capped keyword read names every legacy source ---------------------
 
 
 def test_capped_keyword_retrieval_names_every_legacy_source(tmp_path, fake_embedder, text_pdfs):

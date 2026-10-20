@@ -24,8 +24,7 @@ All notable changes to this project are documented here. The format follows
   of a traceback.
 - An unchanged rerun lists each library folder once: a per-run cache of
   folder listings and canonical routes replaces re-listing every ancestor
-  folder of every stored source. A 3,000-folder Zotero-style rerun fell from
-  17.9 s to 2.5 s.
+  folder of every stored source.
 - Adding or removing a link to an external folder (the canonical route is the
   first link in sorted order) moves stored sources between routes by
   re-keying their chunks; an unchanged file is neither extracted nor embedded
@@ -142,7 +141,7 @@ All notable changes to this project are documented here. The format follows
 - Fixed cluster counts reject fractional and nonfinite values instead of
   truncating them or failing with a Python conversion error.
 
-### Review fixes
+### Corpus, analysis and interface fixes
 
 **Re-ingest required.** The sentence segmenter is now `pysbd-0.3.4+blocks-v3`
 (CJK full stops end sentences); your usual `cda ingest` refreshes existing

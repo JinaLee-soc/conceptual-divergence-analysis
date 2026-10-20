@@ -42,7 +42,7 @@ TRIAL_KWARGS = dict(
 )
 
 
-# --- B4: the silhouette evaluation sample covers every cluster ---------------
+# --- the silhouette evaluation sample covers every cluster ---------------
 
 
 def _outlier_outside_sample(n=300, subsample=100, seed=42):
@@ -107,7 +107,7 @@ def test_undefined_silhouette_is_logged_with_its_reason():
     assert "its own cluster" in sweep[0]["silhouette_undefined"]
 
 
-# --- C1: no valid partition is never reported as robust structure -----------
+# --- no valid partition is never reported as robust structure -----------
 
 
 def _identical(n, prefix, embedder):
@@ -190,7 +190,7 @@ def test_report_header_shows_na_silhouette_without_a_partition():
     assert "sil=n/a, N=4" in header and "0.000" not in header
 
 
-# --- D10: flag thresholds are validated like flag_params ---------------------
+# --- flag thresholds are validated like flag_params ---------------------
 
 
 @pytest.mark.parametrize("value", [True, 0.5, -1, "two"])
@@ -210,7 +210,7 @@ def test_valid_thresholds_are_unchanged():
     assert _thresholds({"underrepresented_max_researcher_passages": 2.0}) == (0.8, 0.1, 2)
 
 
-# --- A8: the order-stability benchmark mirrors the pipeline's refusal -------
+# --- the order-stability benchmark mirrors the pipeline's refusal -------
 
 
 @pytest.mark.parametrize("clustering", [{"k": 6}, {"method": "hierarchical"}])
@@ -253,7 +253,7 @@ def test_benchmark_render_marks_no_partition_trials():
     assert "looks robust" not in text and "No valid joint partition" in text
 
 
-# --- B7 / E3: bootstrap and saturation benchmarks ----------------------------
+# --- bootstrap and saturation benchmarks ----------------------------
 
 
 @pytest.mark.parametrize("fraction", [0.0, -0.2, 1.5, float("nan")])
