@@ -731,6 +731,7 @@ _ZOTERO_FIELDS = (
     "zotero_match",
     "zotero_unmatched_reason",
     "zotero_csv_sha256",
+    "zotero_match_filename",
 )
 
 
@@ -1024,6 +1025,7 @@ def _refresh_zotero_metadata(
     if (
         same_fields
         and first.get("zotero_csv_sha256") == zotero["sha256"]
+        and first.get("zotero_match_filename") == _nfc(pdf_path.name)
         and was_shared == shared_basename
     ):
         stats["zotero_unchanged"] += 1
@@ -1032,13 +1034,16 @@ def _refresh_zotero_metadata(
     text = unicodedata.normalize("NFC", extract_pdf_text(pdf_path)) if needs_text else ""
     fields = _zotero_fields(pdf_path, rel_name, text, zotero, shared_basename, stats, progress)
     fields["zotero_csv_sha256"] = zotero["sha256"]
+    fields["zotero_match_filename"] = _nfc(pdf_path.name)
     # Chroma merges metadata on update; None removes a field no longer supplied.
     patches = [
         {key: fields.get(key) for key in _ZOTERO_FIELDS if m.get(key) != fields.get(key)}
         for m in old_metadata
     ]
     ids = stored["ids"]
-    changed = sorted({key for patch in patches for key in patch} - {"zotero_csv_sha256"})
+    changed = sorted(
+        {key for patch in patches for key in patch} - {"zotero_csv_sha256", "zotero_match_filename"}
+    )
     try:
         for start in range(0, len(ids), 1000):
             updates = [
@@ -1286,6 +1291,7 @@ def _handle_missing(
     file_digests: dict[str, str] | None = None,
     routes: dict[str, Path] | None = None,
     index: _DiskIndex | None = None,
+    failed_renames: set[str] | None = None,
 ) -> None:
     """Report, and with ``prune_missing`` remove, stored sources the library no longer backs.
 
@@ -1319,6 +1325,15 @@ def _handle_missing(
         stored_sources=current,
         index=index,
     )
+    retained_renames = sorted(set(missing) & (failed_renames or set()))
+    if retained_renames:
+        missing = [name for name in missing if name not in failed_renames]
+        stats["pdfs_kept_previous"] += len(retained_renames)
+        progress(
+            "[warn] renamed files could not be read; their previous stored versions "
+            "are retained until the replacements can be stored:\n"
+            + "\n".join(f"    {name}" for name in retained_renames)
+        )
     excluded = _excluded_sources(
         collection, pdf_dir, pdf_root, exclude, recursive, stored_sources=current, index=index
     )
@@ -1614,6 +1629,7 @@ def ingest_pdf_dir(
         key for key, n in Counter(normalize_key(p.name) for p in pdf_paths).items() if key and n > 1
     }
     unreadable: list[str] = []
+    failed_renames: set[str] = set()
     unchecked: set[str] = set()  # stored relpaths whose folder could not be listed
     file_digests: dict[str, str] = {}  # NFC relpath -> sha256 of every file read this run
     moves: list[tuple[str, str | None, str]] = []  # (old relpath, its root, new relpath) re-keyed
@@ -1755,11 +1771,24 @@ def ingest_pdf_dir(
                 # earlier-sorting link now reaches the folder). Re-key those
                 # chunks under this identity instead of extracting and
                 # embedding the file again.
+                try:
+                    acquisition_date = file_acquisition_date(pdf_path)
+                except Exception as exc:
+                    stats["pdfs_unreadable"] += 1
+                    failed_renames.update(renamed)
+                    unreadable.append(
+                        rel_name + _failed_refresh(collection, rel_name, state, stats)
+                    )
+                    progress(
+                        f"  [ingest] {rel_name}: could not read its file properties "
+                        f"({type(exc).__name__}: {exc}); stored copies kept for retry"
+                    )
+                    continue
                 identity = {
                     "pdf_filename": _nfc(pdf_path.name),
                     "pdf_relpath": rel_name,
                     "pdf_root": pdf_root,
-                    "date_added_fs": file_acquisition_date(pdf_path),
+                    "date_added_fs": acquisition_date,
                 }
                 kept = None if zotero else _stored_zotero_fields(collection, [rel_name, *renamed])
                 prepared = _rekeyed_chunks(
@@ -1857,6 +1886,7 @@ def ingest_pdf_dir(
             }
             if zotero:
                 base_meta["zotero_csv_sha256"] = zotero["sha256"]
+                base_meta["zotero_match_filename"] = _nfc(pdf_path.name)
                 shared = normalize_key(pdf_path.name) in shared_basenames
                 base_meta.update(
                     _zotero_fields(pdf_path, rel_name, text, zotero, shared, stats, progress)
@@ -1904,6 +1934,7 @@ def ingest_pdf_dir(
             file_digests=file_digests,
             routes=routes,
             index=index,
+            failed_renames=failed_renames,
         )
 
     progress(

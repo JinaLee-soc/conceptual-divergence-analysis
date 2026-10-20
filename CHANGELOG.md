@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Renamed files and Zotero matching
+
+- Renaming a PDF refreshes its Zotero match even when the CSV is unchanged.
+  The filename used for matching is recorded separately, so a later CSV
+  import also repairs metadata retained during a rename without an export.
+  Older stores refresh matching once on their next CSV import.
+- A failed file-property read during a rename leaves the previous stored
+  copy intact, including with `--prune-missing`, and ingestion continues
+  with the remaining PDFs.
+
 ### Guard access on network filesystems, rerun cost, and route moves
 
 - The `.ingest.guard` file is opened read-write when the user may write it
