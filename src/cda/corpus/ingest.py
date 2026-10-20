@@ -95,7 +95,9 @@ def get_collection(config: Config, *, create: bool = False):
     chroma_dir = _store_directory(config)
     collection_name = str(config.get("corpus.collection"))
 
-    if not create and not chroma_dir.exists():
+    # The store file, not the directory: a refused lock leaves an empty
+    # directory holding only .ingest.guard, which is not a corpus.
+    if not create and not (chroma_dir / "chroma.sqlite3").is_file():
         raise FileNotFoundError(
             f"No corpus found at {chroma_dir}.\n"
             "Build one first:  cda ingest --pdf-dir PATH [--zotero-csv EXPORT.csv]\n"
@@ -354,12 +356,28 @@ def _reclaim_stale_lock(lock_path: Path, expected: str) -> bool:
 
 
 def _wait_for_corpus_lock(lock_path, deadline, progress, announced):
+    """Wait one poll interval for the holder; at the deadline, name what is actually held.
+
+    A holder of the PID file is named by that file. When no PID file exists,
+    a live process holds only the OS lock on ``.ingest.guard`` (a holder
+    between taking the guard and writing its record, or another program
+    locking the guard); there is nothing on disk to remove, so none is
+    advised.
+    """
     if not announced:
         progress(
             "[corpus] another ingest or retrieval is running on this corpus "
             f"(lock file: {lock_path}); waiting for it to finish…"
         )
     if time.monotonic() >= deadline:
+        if not lock_path.exists():
+            guard_path = lock_path.with_name(".ingest.guard")
+            raise CorpusLockError(
+                f"Another process still holds the corpus guard {guard_path} after "
+                f"{_INGEST_LOCK_TIMEOUT_SECONDS}s, and no PID file ({lock_path.name}) names "
+                "it. Let the other corpus operation finish and retry. There is nothing to "
+                "remove: leave .ingest.guard in place."
+            )
         raise CorpusLockError(
             f"Another ingest or retrieval still holds {lock_path} after "
             f"{_INGEST_LOCK_TIMEOUT_SECONDS}s. Let the other corpus operation finish and retry. "
@@ -380,32 +398,80 @@ _GUARD_UNSUPPORTED = frozenset(
 )
 
 
-def _open_guard(guard_path: Path) -> int:
-    """Open (creating if needed) the guard file for locking, readable by every user.
-
-    POSIX ``flock`` works on a read-only descriptor, so the guard is opened
-    read-only there and created world-readable (the umask applies); a
-    group-shared corpus, or a container whose uid differs from the host's,
-    can then lock it too. ``msvcrt.locking`` needs a writable handle. A
-    guard this user may not open is reported with the fix instead of a
-    bare ``PermissionError``.
-    """
-    flags = os.O_CREAT | (os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+def _guard_owner(guard_path: Path) -> str:
     try:
-        return os.open(guard_path, flags, 0o666)
+        status = os.stat(guard_path)
+        return f"owned by uid {status.st_uid}, mode {status.st_mode & 0o777:04o}"
+    except OSError:
+        return "its owner and mode could not be read"
+
+
+def _open_guard(guard_path: Path) -> tuple[int, bool]:
+    """Open (creating if needed) the guard file for locking; returns (fd, writable).
+
+    The guard is created world-readable and -writable (the umask applies) and
+    opened read-write when this user may; a group-shared corpus, or a
+    container whose uid differs from the host's, can then lock it too. On
+    POSIX a guard this user may only read is opened read-only, which local
+    ``flock`` accepts; a network filesystem (Linux NFS emulates ``flock``
+    with byte-range locks) refuses an exclusive lock on such a descriptor
+    with ``EBADF``, which ``_corpus_guard`` reports with the ``chmod`` to
+    run. ``msvcrt.locking`` needs a writable handle, so Windows never falls
+    back. A guard this user may not open at all is reported with the fix
+    instead of a bare ``PermissionError``.
+    """
+    try:
+        return os.open(guard_path, os.O_CREAT | os.O_RDWR, 0o666), True
     except PermissionError as exc:
-        try:
-            status = os.stat(guard_path)
-            owner = f"owned by uid {status.st_uid}, mode {status.st_mode & 0o777:04o}"
-        except OSError:
-            owner = "its owner and mode could not be read"
+        if os.name != "nt":
+            try:
+                return os.open(guard_path, os.O_CREAT | os.O_RDONLY, 0o666), False
+            except PermissionError:
+                pass
         access = "read and write access" if os.name == "nt" else "read access"
         raise CorpusLockError(
-            f"Cannot open the corpus lock guard {guard_path} ({owner}): "
+            f"Cannot open the corpus lock guard {guard_path} ({_guard_owner(guard_path)}): "
             f"{exc.strerror or exc}. Every user who runs CDA on this corpus needs "
-            f"{access} to this permanent coordination file. Ask its owner to run "
-            f"`chmod a+r {guard_path}` (or `chmod 666` for a shared corpus) and retry."
+            f"{access} to this permanent coordination file (write access on a network "
+            f"filesystem). Ask its owner to run `chmod a+r {guard_path}` (or `chmod 666` "
+            "for a shared corpus) and retry."
         ) from exc
+
+
+def _guard_lock_refused_read_only(guard_path: Path, writable: bool, exc: OSError) -> str:
+    """Message for ``EBADF`` from the guard lock: the descriptor lacks the needed access."""
+    opened = (
+        "The guard was opened read-write, yet the lock was refused"
+        if writable
+        else "The guard was opened without write access (read-only, because this user may "
+        "not write it)"
+    )
+    return (
+        f"Cannot lock the corpus guard {guard_path} ({_guard_owner(guard_path)}): "
+        f"EBADF: {exc.strerror or exc}. {opened}; on a network filesystem (NFS) an "
+        "exclusive lock needs write access to the file. Ask its owner to run "
+        f"`chmod a+w {guard_path}` (or `chmod 666` for a shared corpus) and retry. "
+        "Nothing in the corpus was read or written. Leave .ingest.guard in place."
+    )
+
+
+def _guard_unsupported(guard_path: Path, store_existed: bool, guard_existed: bool) -> str:
+    """Message for a filesystem that cannot take the guard lock, naming what now exists."""
+    created = []
+    if not store_existed:
+        created.append(f"the store directory {guard_path.parent}")
+    if not guard_existed:
+        created.append(f"the empty guard file {guard_path.name}")
+    state = (
+        f"CDA created only {' and '.join(created)}; nothing else was written."
+        if created
+        else f"Nothing was written; {guard_path.parent} and {guard_path.name} already existed."
+    )
+    return (
+        "The filesystem could not provide the required OS lock. No corpus data was read "
+        f"or written. {state} Use a corpus directory on a filesystem that supports OS file "
+        "locks, or restore locking support and retry. Leave .ingest.guard in place."
+    )
 
 
 def _lock_guard(fd: int) -> None:
@@ -422,17 +488,20 @@ def _lock_guard(fd: int) -> None:
 
 
 @contextmanager
-def _corpus_guard(lock_path, deadline, progress):
+def _corpus_guard(lock_path, deadline, progress, *, store_existed: bool = True):
     """Hold an OS lock on a persistent inode, including during stale PID-file recovery.
 
     Closing the descriptor releases the guard even after a process crash.
     Its file must never be unlinked: all waiters must lock the same inode.
     A filesystem that refuses the lock stops the operation before the PID
-    file or corpus is touched. PID-file recovery alone cannot serialize
-    callers, even when the stale file's contents are checked after rename.
+    file or corpus is touched; the refusal names what the attempt created
+    (``store_existed`` says whether the store directory predates it). PID-file
+    recovery alone cannot serialize callers, even when the stale file's
+    contents are checked after rename.
     """
     guard_path = lock_path.with_name(".ingest.guard")
-    fd = _open_guard(guard_path)
+    guard_existed = guard_path.exists()
+    fd, writable = _open_guard(guard_path)
     try:
         announced = False
         while True:
@@ -444,10 +513,11 @@ def _corpus_guard(lock_path, deadline, progress):
                     raise CorpusLockError(
                         f"Cannot safely lock the corpus at {guard_path} "
                         f"({errno.errorcode.get(exc.errno, exc.errno)}: {exc.strerror or exc}). "
-                        "The filesystem could not provide the required OS lock. "
-                        "No corpus operation was started. Use a corpus directory on a "
-                        "filesystem that supports OS file locks, or restore locking "
-                        "support and retry. Leave .ingest.guard in place."
+                        + _guard_unsupported(guard_path, store_existed, guard_existed)
+                    ) from exc
+                if exc.errno == errno.EBADF:
+                    raise CorpusLockError(
+                        _guard_lock_refused_read_only(guard_path, writable, exc)
                     ) from exc
                 if exc.errno not in _GUARD_BUSY:
                     raise
@@ -475,10 +545,11 @@ def corpus_lock(config: Config, progress: Callable[[str], None]):
     known to be stale as well.
     """
     store_dir = _store_directory(config)
+    store_existed = store_dir.is_dir()
     store_dir.mkdir(parents=True, exist_ok=True)
     lock_path = store_dir / ".ingest.lock"
     deadline = time.monotonic() + _INGEST_LOCK_TIMEOUT_SECONDS
-    with _corpus_guard(lock_path, deadline, progress):
+    with _corpus_guard(lock_path, deadline, progress, store_existed=store_existed):
         announced = False
         while True:
             try:
@@ -493,9 +564,9 @@ def corpus_lock(config: Config, progress: Callable[[str], None]):
                     # or a recycled pid), never a live holder. A record of another
                     # live PID is waited on: with the guard held it is not a
                     # current-protocol holder, but it may be a legacy holder (a
-                    # version without the guard, or one that fell back to the PID
-                    # file on a filesystem without OS locks), which the PID file
-                    # alone cannot tell from a stale record.
+                    # version from before the guard existed, which coordinated
+                    # on the PID file alone), which the PID file alone cannot
+                    # tell from a stale record.
                     stale = True
                 if not stale and pid is None and not content:
                     age = _unreadable_lock_age(lock_path)
@@ -603,31 +674,35 @@ def _same_file_elsewhere(
     ]
 
 
-def _copy_still_matches(root: Path, relpath: str, sha256: str, unchecked: set[str]) -> bool:
+def _copy_still_matches(
+    root: Path, relpath: str, sha256: str, unchecked: set[str], index: _DiskIndex | None = None
+) -> bool:
     """A missing copy can be renamed; a live copy must still hold the recorded bytes.
 
     A copy whose folder cannot be listed is assumed to still match, so it is
     neither renamed away nor ignored.
     """
-    if not _exists_or_unchecked(root, relpath, unchecked):
+    if not _exists_or_unchecked(root, relpath, unchecked, index):
         return True
     if relpath in unchecked:
         return True
     try:
-        return file_digest(_path_exactly(root, relpath) or root / relpath) == sha256
+        return file_digest(_path_exactly(root, relpath, index) or root / relpath) == sha256
     except OSError:
         # An unreadable candidate cannot justify dropping the readable source.
         return False
 
 
-def _exists_or_unchecked(root: Path, relpath: str, unchecked: set[str]) -> bool:
+def _exists_or_unchecked(
+    root: Path, relpath: str, unchecked: set[str], index: _DiskIndex | None = None
+) -> bool:
     """``_exists_exactly``, except that a folder that cannot be listed counts as present.
 
     Such a relpath is added to ``unchecked`` and reported at the end of the
     run; it is never pruned or renamed away.
     """
     try:
-        return _exists_exactly(root, relpath)
+        return _exists_exactly(root, relpath, index)
     except OSError:
         unchecked.add(relpath)
         return True
@@ -746,14 +821,21 @@ def _canonical_routes(pdf_dir: Path, paths) -> dict[str, Path]:
     return routes
 
 
-def _canonical_relpath(root: Path, relpath: str, routes: dict[str, Path] | None = None) -> str:
+def _canonical_relpath(
+    root: Path,
+    relpath: str,
+    routes: dict[str, Path] | None = None,
+    index: _DiskIndex | None = None,
+) -> str:
     """The route ``select_pdfs`` lists ``root/relpath`` under, in NFC.
 
     Use the selection's route for external files too. Without a mapped route,
     resolve internal links and preserve external or missing paths as recorded.
+    ``index`` supplies cached folder listings; ``_DiskIndex.canonical`` is
+    this computed once per stored relpath.
     """
     try:
-        disk_path = _path_exactly(root, relpath)
+        disk_path = _path_exactly(root, relpath, index)
     except OSError:
         disk_path = None  # absence is checked separately; unreadable folders are retained
     real = os.path.realpath(disk_path or root / relpath)
@@ -765,9 +847,18 @@ def _canonical_relpath(root: Path, relpath: str, routes: dict[str, Path] | None 
         return _nfc(relpath)
 
 
-def _is_alias_route(root: Path, relpath: str, routes: dict[str, Path] | None = None) -> bool:
+def _is_alias_route(
+    root: Path,
+    relpath: str,
+    routes: dict[str, Path] | None = None,
+    index: _DiskIndex | None = None,
+) -> bool:
     """Whether a stored relpath is a link route to a file stored under its real path instead."""
-    return _canonical_relpath(root, relpath, routes) != _nfc(relpath)
+    if index is not None and root == index.root and routes is index.routes:
+        canonical = index.canonical(relpath)
+    else:
+        canonical = _canonical_relpath(root, relpath, routes, index)
+    return canonical != _nfc(relpath)
 
 
 def _walk_files(pdf_dir: Path, recursive: bool) -> list[Path]:
@@ -1009,29 +1100,76 @@ def _stored_pdf_sources(collection, batch_size: int = 5000) -> dict[str, dict]:
         offset += len(metadatas)
 
 
-def _exists_exactly(root: Path, relpath: str) -> bool:
+class _DiskIndex:
+    """Per-run cache of folder listings and of stored sources' canonical routes.
+
+    One ingest run neither renames nor removes library files, so a folder is
+    listed once ({NFC name: name on disk}) however many stored relpaths pass
+    through it, and a stored relpath's canonical route under ``root`` is
+    computed once however many checks ask for it. Without the cache every
+    check re-listed every ancestor folder of every stored source, which made
+    an unchanged rerun quadratic in the library size. Each run builds its
+    own index and nothing is kept at module level, so no run can see a
+    listing another run made.
+    """
+
+    def __init__(self, root: Path, routes: dict[str, Path] | None = None):
+        self.root = root
+        self.routes = routes
+        self._listings: dict[str, dict[str, str] | None] = {}
+        self._canonical: dict[str, str] = {}
+
+    def listing(self, directory: Path) -> dict[str, str] | None:
+        """{NFC name: disk name} of ``directory``, or ``None`` when it is not a directory.
+
+        Of two disk names with one NFC form, the first listed wins. Permission
+        and I/O errors propagate and are not cached: they do not prove
+        absence, so pruning or rename detection cannot act on them.
+        """
+        key = os.fspath(directory)
+        if key not in self._listings:
+            try:
+                names = os.listdir(directory)
+            except (FileNotFoundError, NotADirectoryError):
+                self._listings[key] = None
+            else:
+                table: dict[str, str] = {}
+                for name in names:
+                    table.setdefault(_nfc(name), name)
+                self._listings[key] = table
+        return self._listings[key]
+
+    def canonical(self, relpath: str) -> str:
+        """``_canonical_relpath`` of a stored relpath under this root, computed once."""
+        if relpath not in self._canonical:
+            self._canonical[relpath] = _canonical_relpath(self.root, relpath, self.routes, self)
+        return self._canonical[relpath]
+
+
+def _exists_exactly(root: Path, relpath: str, index: _DiskIndex | None = None) -> bool:
     """Whether ``root/relpath`` is a file under exactly this spelling, letter case included.
 
     ``Path.is_file`` ignores case on case-insensitive filesystems (the macOS
     default), so a renamed file would still look present under its old name.
     NFC and NFD spellings of one name count as the same name.
     """
-    path = _path_exactly(root, relpath)
+    path = _path_exactly(root, relpath, index)
     return path is not None and path.is_file()
 
 
-def _path_exactly(root: Path, relpath: str) -> Path | None:
-    """Resolve a stored NFC relpath to its disk spelling without ignoring letter case."""
+def _path_exactly(root: Path, relpath: str, index: _DiskIndex | None = None) -> Path | None:
+    """Resolve a stored NFC relpath to its disk spelling without ignoring letter case.
+
+    ``index`` caches the folder listings across calls; without one each
+    ancestor folder is listed for this call alone.
+    """
+    index = _DiskIndex(root) if index is None else index
     current = root
     for part in Path(relpath).parts:
-        try:
-            names = os.listdir(current)
-        except (FileNotFoundError, NotADirectoryError):
+        names = index.listing(current)
+        if names is None:
             return None
-        # Permission and I/O errors do not prove absence. Propagate them so
-        # pruning or rename detection cannot delete an inaccessible source.
-        wanted = unicodedata.normalize("NFC", part)
-        match = next((n for n in names if unicodedata.normalize("NFC", n) == wanted), None)
+        match = names.get(_nfc(part))
         if match is None:
             return None
         current = current / match
@@ -1047,6 +1185,8 @@ def _missing_sources(
     recursive: bool = True,
     unchecked: set[str] | None = None,
     routes: dict[str, Path] | None = None,
+    stored_sources: dict[str, dict] | None = None,
+    index: _DiskIndex | None = None,
 ) -> tuple[list[str], list[str]]:
     """(missing, root_unknown) among the stored sources.
 
@@ -1056,22 +1196,25 @@ def _missing_sources(
     instead). ``root_unknown``: sources stored before ``pdf_root`` was
     recorded; they may belong to any library, so they are never attributed
     to this root or pruned. A source whose folder cannot be listed is not
-    missing; it is added to ``unchecked``.
+    missing; it is added to ``unchecked``. ``stored_sources`` (a scan of the
+    store) and ``index`` (the run's folder listings and canonical routes)
+    are shared with the other listings so each is built once per run.
     """
     unchecked = set() if unchecked is None else unchecked
+    stored_sources = _stored_pdf_sources(collection) if stored_sources is None else stored_sources
+    index = _DiskIndex(pdf_dir, routes) if index is None else index
     missing, root_unknown = [], []
-    for relpath, info in sorted(_stored_pdf_sources(collection).items()):
+    for relpath, info in sorted(stored_sources.items()):
         if info["pdf_root"] is None:
             root_unknown.append(relpath)
-        elif (
-            info["pdf_root"] == pdf_root
-            and not _is_excluded(
-                Path(_canonical_relpath(pdf_dir, relpath, routes)), exclude, recursive=recursive
-            )
-            and not _is_alias_route(pdf_dir, relpath, routes)
-            and not _exists_or_unchecked(pdf_dir, relpath, unchecked)
-        ):
-            missing.append(relpath)
+        elif info["pdf_root"] == pdf_root:
+            canonical = index.canonical(relpath)
+            if (
+                not _is_excluded(Path(canonical), exclude, recursive=recursive)
+                and canonical == _nfc(relpath)  # not an alias route
+                and not _exists_or_unchecked(pdf_dir, relpath, unchecked, index)
+            ):
+                missing.append(relpath)
     return missing, root_unknown
 
 
@@ -1082,15 +1225,18 @@ def _excluded_sources(
     exclude: list[str] | None,
     recursive: bool,
     routes: dict[str, Path] | None = None,
+    *,
+    stored_sources: dict[str, dict] | None = None,
+    index: _DiskIndex | None = None,
 ) -> list[str]:
     """Stored sources of this PDF root whose canonical route the current ``exclude``/``recursive`` leave out."""
+    stored_sources = _stored_pdf_sources(collection) if stored_sources is None else stored_sources
+    index = _DiskIndex(pdf_dir, routes) if index is None else index
     return [
         relpath
-        for relpath, info in sorted(_stored_pdf_sources(collection).items())
+        for relpath, info in sorted(stored_sources.items())
         if info["pdf_root"] == pdf_root
-        and _is_excluded(
-            Path(_canonical_relpath(pdf_dir, relpath, routes)), exclude, recursive=recursive
-        )
+        and _is_excluded(Path(index.canonical(relpath)), exclude, recursive=recursive)
     ]
 
 
@@ -1101,6 +1247,9 @@ def _alias_sources(
     exclude: list[str] | None,
     recursive: bool,
     routes: dict[str, Path] | None = None,
+    *,
+    stored_sources: dict[str, dict] | None = None,
+    index: _DiskIndex | None = None,
 ) -> list[str]:
     """Stored sources of this PDF root recorded under a link route to a selected file.
 
@@ -1108,15 +1257,18 @@ def _alias_sources(
     is normally replaced by that path during the run, so only one whose file
     was skipped or unreadable remains to be listed here.
     """
-    return [
-        relpath
-        for relpath, info in sorted(_stored_pdf_sources(collection).items())
-        if info["pdf_root"] == pdf_root
-        and _is_alias_route(pdf_dir, relpath, routes)
-        and not _is_excluded(
-            Path(_canonical_relpath(pdf_dir, relpath, routes)), exclude, recursive=recursive
-        )
-    ]
+    stored_sources = _stored_pdf_sources(collection) if stored_sources is None else stored_sources
+    index = _DiskIndex(pdf_dir, routes) if index is None else index
+    aliased = []
+    for relpath, info in sorted(stored_sources.items()):
+        if info["pdf_root"] != pdf_root:
+            continue
+        canonical = index.canonical(relpath)
+        if canonical != _nfc(relpath) and not _is_excluded(
+            Path(canonical), exclude, recursive=recursive
+        ):
+            aliased.append(relpath)
+    return aliased
 
 
 def _handle_missing(
@@ -1133,6 +1285,7 @@ def _handle_missing(
     stored_sources: dict[str, dict] | None = None,
     file_digests: dict[str, str] | None = None,
     routes: dict[str, Path] | None = None,
+    index: _DiskIndex | None = None,
 ) -> None:
     """Report, and with ``prune_missing`` remove, stored sources the library no longer backs.
 
@@ -1147,8 +1300,15 @@ def _handle_missing(
     failed refresh). Retention does not depend on ``prune_missing``.
     """
     unchecked = set() if unchecked is None else unchecked
-    stored_sources = _stored_pdf_sources(collection) if stored_sources is None else stored_sources
     file_digests = {} if file_digests is None else file_digests
+    index = _DiskIndex(pdf_dir, routes) if index is None else index
+    # One fresh scan of the store feeds the three listings below. The loop's
+    # ``stored_sources`` is not used for them: it does not track every
+    # deletion the loop made (alternate Unicode spellings removed by
+    # ``_delete_sources``, incomplete chunks removed by ``_failed_refresh``),
+    # and a deleted name listed here would be miscounted as missing or aliased.
+    current = _stored_pdf_sources(collection)
+    stored_sources = current if stored_sources is None else stored_sources
     missing, root_unknown = _missing_sources(
         collection,
         pdf_dir,
@@ -1156,18 +1316,23 @@ def _handle_missing(
         exclude=exclude,
         recursive=recursive,
         unchecked=unchecked,
-        routes=routes,
+        stored_sources=current,
+        index=index,
     )
-    excluded = _excluded_sources(collection, pdf_dir, pdf_root, exclude, recursive, routes)
-    aliased = _alias_sources(collection, pdf_dir, pdf_root, exclude, recursive, routes)
+    excluded = _excluded_sources(
+        collection, pdf_dir, pdf_root, exclude, recursive, stored_sources=current, index=index
+    )
+    aliased = _alias_sources(
+        collection, pdf_dir, pdf_root, exclude, recursive, stored_sources=current, index=index
+    )
     # A replacement must survive cleanup. In particular, aliases must not
     # certify each other and then both be deleted after a failed refresh.
     cleanup_candidates = set(missing) | set(excluded) | set(aliased)
     retained, duplicates, older = [], [], []
     for relpath in aliased:
-        canonical = _canonical_relpath(pdf_dir, relpath, routes)
+        canonical = index.canonical(relpath)
         try:
-            exists = _exists_exactly(pdf_dir, canonical)
+            exists = _exists_exactly(pdf_dir, canonical, index)
         except OSError:
             unchecked.add(relpath)
             continue
@@ -1246,6 +1411,114 @@ def _handle_missing(
         progress(f"[ingest] removed {len(relpaths)} source(s) {what}:\n{listing}")
 
 
+def _reusable_copy(collection, copies: list[str], current: dict) -> str | None:
+    """The first stored copy whose chunks are complete and current, so they can be re-keyed.
+
+    Its bytes already equal the file's (``current`` carries the digest), so
+    when the chunk settings and segmenter are current too, the stored text,
+    sentence boundaries, and embeddings are exactly what a rebuild would
+    produce; only the identity changes. A copy that is stale, partial, or
+    legacy is rebuilt as before.
+    """
+    for relpath in copies:
+        if _ingest_state(collection, relpath, current)[0] == "complete":
+            return relpath
+    return None
+
+
+def _rekeyed_chunks(
+    collection, relpath: str, id_key: str, identity: dict, zotero_fields: dict | None
+) -> dict:
+    """The stored chunks of ``relpath`` prepared under a new identity (see ``_prepare_chunks``).
+
+    Text, sentence boundaries, and embeddings are taken as stored; the
+    ``identity`` fields replace the old ones. ``zotero_fields`` replaces the
+    stored Zotero fields (the caller takes them from the stored sources, as
+    a rebuild without an export would); ``None`` keeps them as stored for a
+    later in-place refresh. Nothing is extracted or embedded.
+    """
+    rows = collection.get(
+        where={"pdf_relpath": relpath}, include=["documents", "metadatas", "embeddings"]
+    )
+    order = sorted(range(len(rows["ids"])), key=lambda i: rows["metadatas"][i]["chunk_index"])
+    metadatas = []
+    for i in order:
+        metadata = dict(rows["metadatas"][i])
+        if zotero_fields is not None:
+            metadata = {key: value for key, value in metadata.items() if key not in _ZOTERO_FIELDS}
+            metadata.update(zotero_fields)
+        metadata.update(identity)
+        metadatas.append(metadata)
+    return {
+        "id_key": id_key,
+        "source": identity["pdf_relpath"],
+        "ids": [f"{id_key}::c{rows['metadatas'][i]['chunk_index']}" for i in order],
+        "documents": [rows["documents"][i] for i in order],
+        "embeddings": [[float(x) for x in rows["embeddings"][i]] for i in order],
+        "metadatas": metadatas,
+    }
+
+
+def _route_moves_summary(
+    moves: list[tuple[str, str | None, str]], pdf_dir: Path, pdf_root: str, index: _DiskIndex
+) -> list[str]:
+    """One line per route change among the sources re-keyed this run.
+
+    A route change is a move between folders that keeps the trailing path
+    (``b/x.pdf`` to ``a/x.pdf``): the canonical route of an external folder
+    is its first link in sorted order, so adding or removing a link moves
+    every source in that folder. Plain renames and copies that came from
+    another PDF root are summarized separately.
+    """
+
+    def route(parts: tuple[str, ...]) -> str:
+        return f"route {'/'.join(parts)}/" if parts else "the top level"
+
+    changes: Counter[tuple[tuple[str, ...], tuple[str, ...], str]] = Counter()
+    renamed = other_root = 0
+    for old, root, new in moves:
+        if root not in (None, pdf_root):
+            other_root += 1
+            continue
+        old_parts, new_parts = Path(old).parts, Path(new).parts
+        shared = 0
+        while (
+            shared < min(len(old_parts), len(new_parts))
+            and old_parts[-1 - shared] == new_parts[-1 - shared]
+        ):
+            shared += 1
+        if shared == 0:
+            renamed += 1
+            continue
+        try:
+            old_disk = _path_exactly(pdf_dir, old, index)
+        except OSError:
+            old_disk = pdf_dir / old
+        if old_disk is None:
+            reason = "the old route is no longer on disk"
+        elif os.path.realpath(old_disk) == os.path.realpath(pdf_dir / new):
+            reason = "a link that sorts earlier now reaches the same folder"
+        else:
+            reason = "the file is now selected under this route"
+        changes[(old_parts[:-shared], new_parts[:-shared], reason)] += 1
+    lines = [
+        f"[ingest] {n} source(s) moved from {route(old)} to {route(new)} because {reason}; "
+        "their text and embeddings were re-keyed, not rebuilt"
+        for (old, new, reason), n in sorted(changes.items())
+    ]
+    if renamed:
+        lines.append(
+            f"[ingest] {renamed} source(s) renamed on disk were re-keyed; their text and "
+            "embeddings were not rebuilt"
+        )
+    if other_root:
+        lines.append(
+            f"[ingest] {other_root} source(s) stored under another PDF root were re-keyed to "
+            "this root; their text and embeddings were not rebuilt"
+        )
+    return lines
+
+
 def ingest_pdf_dir(
     config: Config,
     embedder: Embedder,
@@ -1307,6 +1580,7 @@ def ingest_pdf_dir(
         "pdfs_kept_previous": 0,
         "pdfs_duplicates_skipped": 0,
         "pdfs_renamed": 0,
+        "pdfs_moved": 0,
         "pdfs_root_unknown": 0,
         "pdfs_root_adopted": 0,
         "pdfs_unchecked": 0,
@@ -1314,6 +1588,7 @@ def ingest_pdf_dir(
         "zotero_unchanged": 0,
     }
     pdf_paths, n_excluded, routes = _select_pdf_routes(pdf_dir, recursive, exclude)
+    index = _DiskIndex(pdf_dir, routes)  # this run's folder listings and canonical routes
     stats["pdfs_excluded"] = n_excluded
     if not recursive:
         progress(f"[ingest] {pdf_dir}: top level only (sub-folders not searched)")
@@ -1341,6 +1616,7 @@ def ingest_pdf_dir(
     unreadable: list[str] = []
     unchecked: set[str] = set()  # stored relpaths whose folder could not be listed
     file_digests: dict[str, str] = {}  # NFC relpath -> sha256 of every file read this run
+    moves: list[tuple[str, str | None, str]] = []  # (old relpath, its root, new relpath) re-keyed
     with corpus_lock(config, progress):
         collection = get_collection(config, create=True)
         chunk_size, chunk_overlap = _chunk_settings(config)
@@ -1424,30 +1700,32 @@ def ingest_pdf_dir(
                 (name, root)
                 for name, root in copies
                 if _copy_still_matches(
-                    Path(root) if root else pdf_dir, name, source_sha256, unchecked
+                    pdf_dir if root in (None, pdf_root) else Path(root),
+                    name,
+                    source_sha256,
+                    unchecked,
+                    index,
                 )
             ]
             # A copy stored under a link route to this very file is not a
-            # second copy: the canonical route replaces it (a rename).
-            present = [
-                (relpath, root)
-                for relpath, root in copies
-                if _exists_or_unchecked(Path(root) if root else pdf_dir, relpath, unchecked)
-                and not _is_alias_route(
-                    Path(root) if root else pdf_dir,
-                    relpath,
-                    routes if root in (None, pdf_root) else None,
-                )
-                and not (
+            # second copy: the canonical route replaces it (a rename). A copy
+            # that is not an alias route is its own canonical route, so the
+            # exclusion check needs no further resolution.
+            present = []
+            for relpath, root in copies:
+                copy_root = pdf_dir if root in (None, pdf_root) else Path(root)
+                copy_routes = routes if copy_root is pdf_dir else None
+                if not _exists_or_unchecked(copy_root, relpath, unchecked, index):
+                    continue
+                if _is_alias_route(copy_root, relpath, copy_routes, index):
+                    continue
+                if (
                     prune_missing
                     and root == pdf_root
-                    and _is_excluded(
-                        Path(_canonical_relpath(pdf_dir, relpath, routes)),
-                        exclude,
-                        recursive=recursive,
-                    )
-                )
-            ]
+                    and _is_excluded(Path(_nfc(relpath)), exclude, recursive=recursive)
+                ):
+                    continue
+                present.append((relpath, root))
             if present:
                 stats["pdfs_duplicates_skipped"] += 1
                 if state != "absent":
@@ -1466,6 +1744,71 @@ def ingest_pdf_dir(
                     )
                     + "; skipping this copy so the document is not counted twice. Remove one "
                     "copy, or ingest the libraries from one shared PDF root."
+                )
+                continue
+            renamed = [relpath for relpath, _ in copies]
+            replaced = {rel_name, *alternates, *renamed}
+            reusable = None if reingest else _reusable_copy(collection, renamed, current)
+            if reusable is not None:
+                # The same bytes are already stored, complete and current, under
+                # another name (a file renamed on disk, or a route change: an
+                # earlier-sorting link now reaches the folder). Re-key those
+                # chunks under this identity instead of extracting and
+                # embedding the file again.
+                identity = {
+                    "pdf_filename": _nfc(pdf_path.name),
+                    "pdf_relpath": rel_name,
+                    "pdf_root": pdf_root,
+                    "date_added_fs": file_acquisition_date(pdf_path),
+                }
+                kept = None if zotero else _stored_zotero_fields(collection, [rel_name, *renamed])
+                prepared = _rekeyed_chunks(
+                    collection, reusable, _relpath_key(rel_name), identity, kept
+                )
+                _refuse_foreign_ids(collection, prepared, replaced)
+                _replace_sources(collection, prepared, replaced)
+                for relpath, root in copies:
+                    progress(
+                        f"  [ingest] {rel_name}: replacing the stored copy {relpath!r} "
+                        "(same bytes; its text and embeddings were re-keyed, not rebuilt)"
+                    )
+                    stored_sources.pop(relpath, None)
+                    moves.append((relpath, root, rel_name))
+                stats["pdfs_renamed"] += len(renamed)
+                stats["pdfs_moved"] += 1
+                stored_sources[rel_name] = {
+                    "pdf_root": pdf_root,
+                    "source_file_sha256": source_sha256,
+                }
+                stats["pdfs_ingested"] += 1
+                stats["pdfs_refreshed"] += state != "absent"
+                if kept:
+                    stats["zotero_kept"] += 1
+                    progress(
+                        f"  [zotero] {rel_name}: no --zotero-csv given; kept its existing "
+                        "Zotero metadata"
+                    )
+                if zotero:
+                    shared = normalize_key(pdf_path.name) in shared_basenames
+                    try:
+                        _refresh_zotero_metadata(
+                            collection, pdf_path, rel_name, zotero, shared, stats, progress
+                        )
+                    except IngestRollbackError:
+                        raise
+                    except Exception as exc:  # extraction failed or the update was rolled back
+                        stats["pdfs_unreadable"] += 1
+                        unreadable.append(
+                            rel_name + _failed_refresh(collection, rel_name, "complete", stats)
+                        )
+                        progress(
+                            f"  [zotero] {rel_name}: could not be read to match the new Zotero "
+                            f"export ({type(exc).__name__}: {exc}); "
+                            + _failed_refresh_note("complete")
+                        )
+                        continue
+                progress(
+                    f"  [ingest] {rel_name}: {len(prepared['ids'])} chunks re-keyed from {reusable!r}"
                 )
                 continue
             if reason:
@@ -1512,7 +1855,6 @@ def ingest_pdf_dir(
                 "sentence_segmenter": SENTENCE_SEGMENTER,
                 "date_added_fs": acquisition_date,
             }
-            renamed = [relpath for relpath, _ in copies]
             if zotero:
                 base_meta["zotero_csv_sha256"] = zotero["sha256"]
                 shared = normalize_key(pdf_path.name) in shared_basenames
@@ -1531,8 +1873,8 @@ def ingest_pdf_dir(
             prepared = _prepare_chunks(
                 embedder, _relpath_key(rel_name), chunks, base_meta, contexts=contexts
             )
-            _refuse_foreign_ids(collection, prepared, {rel_name, *alternates, *renamed})
-            _replace_sources(collection, prepared, {rel_name, *alternates, *renamed})
+            _refuse_foreign_ids(collection, prepared, replaced)
+            _replace_sources(collection, prepared, replaced)
             if alternates:
                 progress(
                     f"  [ingest] {rel_name}: replaced chunks stored under a different Unicode spelling"
@@ -1546,6 +1888,8 @@ def ingest_pdf_dir(
             stats["pdfs_refreshed"] += state != "absent"
             stats["chunks_added"] += len(chunks)
             progress(f"  [ingest] {rel_name}: {len(chunks)} chunks")
+        for line in _route_moves_summary(moves, pdf_dir, pdf_root, index):
+            progress(line)
         _handle_missing(
             collection,
             pdf_dir,
@@ -1559,6 +1903,7 @@ def ingest_pdf_dir(
             stored_sources=stored_sources,
             file_digests=file_digests,
             routes=routes,
+            index=index,
         )
 
     progress(
@@ -1568,8 +1913,8 @@ def ingest_pdf_dir(
         f"({stats['metadata_updated']} with Zotero metadata updated in place), "
         f"{stats['pdfs_duplicates_skipped']} duplicate copies skipped, "
         f"{stats['pdfs_no_text']} with no extractable text, "
-        f"{stats['pdfs_unreadable']} unreadable ({stats['pdfs_kept_previous']} failed files kept "
-        f"their previous version), {stats['pdfs_missing']} missing from disk, "
+        f"{stats['pdfs_unreadable']} unreadable ({stats['pdfs_kept_previous']} previous "
+        f"versions kept), {stats['pdfs_missing']} missing from disk, "
         f"{stats['pdfs_aliased']} stored under a symlink route, "
         f"{stats['pdfs_stored_excluded']} stored but now excluded "
         f"({stats['pdfs_pruned']} removed); {stats['chunks_added']} chunks added"

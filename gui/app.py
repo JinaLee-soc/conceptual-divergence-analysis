@@ -288,10 +288,33 @@ config = build_config(corpus_dir, drafts_dir, output_dir)
 #     in order; each is small enough to read on its own) ----------------------
 
 
-# The public wording for a corpus-lock failure. It must stay generic: the
-# error's own text names the lock file on the host, and the condition is not
-# only "another run holds the corpus" (see _demo_failure_message).
+# The public wordings for a corpus-lock failure. Both must stay path-free:
+# the error's own text names the lock or guard file on the host. A held or
+# busy corpus is transient and the visitor can act on it (retry). Every
+# other CorpusLockError is permanent from the visitor's seat: the filesystem
+# cannot provide an OS lock, the guard cannot be opened for permission
+# reasons, or a lock entry cannot be moved aside. Asking for a retry there
+# would be wrong; only the operator can fix it (see _public_lock_message).
 DEMO_CORPUS_UNAVAILABLE = "The demo cannot reach its corpus right now; please retry."
+DEMO_CORPUS_LOCK_BROKEN = (
+    "The demo's corpus storage cannot be locked on this server; "
+    "the operator needs to fix the installation."
+)
+# Substrings of the lock-wait wordings in cda.corpus.ingest (the timeout
+# "still holds", and the announced wait "waiting for it to finish").
+_TRANSIENT_LOCK_MARKERS = ("still holds", "waiting")
+
+
+def _public_lock_message(exc: CorpusLockError) -> str:
+    """The path-free notice for a corpus-lock failure on the public demo.
+
+    Only the held/busy wordings get the retry notice; the exception text is
+    never shown, because every CorpusLockError names a file on the host.
+    """
+    text = str(exc)
+    if any(marker in text for marker in _TRANSIENT_LOCK_MARKERS):
+        return DEMO_CORPUS_UNAVAILABLE
+    return DEMO_CORPUS_LOCK_BROKEN
 
 
 def _demo_failure_message(exc: Exception, term: str) -> str:
@@ -308,14 +331,12 @@ def _demo_failure_message(exc: Exception, term: str) -> str:
     from cda.llm.base import FixtureMissError
 
     if isinstance(exc, CorpusLockError):
-        # A lock error is transient and the visitor can act on it (retry),
-        # so it is explained in both modes; locally with its text, which
-        # names the lock file. Publicly the wording stays generic: the error
-        # is raised for more than another run holding the corpus (a lock
-        # that could not be reclaimed, a store directory that cannot be
-        # written), and none of those causes is the visitor's to diagnose.
+        # A lock error is explained in both modes; locally with its text,
+        # which names the lock file. Publicly the wording stays path-free
+        # and distinguishes only what the visitor can act on: a held corpus
+        # (retry) from a lock the server cannot take at all (operator).
         if DEMO_MODE:
-            return DEMO_CORPUS_UNAVAILABLE
+            return _public_lock_message(exc)
         return str(exc)
     if not isinstance(exc, FixtureMissError):
         if DEMO_MODE:
@@ -345,10 +366,11 @@ def _own_text_failure_message(exc: Exception) -> str:
 
     The public demo never prints exception text: it can carry absolute paths
     on the host. A lock wait that ran out is the one failure a visitor can
-    act on, so it is named (without the path).
+    act on, so it is named (without the path); a lock the server cannot take
+    at all gets the permanent, operator-facing notice.
     """
     if isinstance(exc, CorpusLockError):
-        return DEMO_CORPUS_UNAVAILABLE if DEMO_MODE else str(exc)
+        return _public_lock_message(exc) if DEMO_MODE else str(exc)
     return f"The preview failed ({type(exc).__name__})." if DEMO_MODE else str(exc)
 
 

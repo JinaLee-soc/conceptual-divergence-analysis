@@ -12,7 +12,7 @@ import pytest
 
 import cda.corpus.ingest as ing
 from cda.corpus.ingest import CorpusLockError
-from tests.test_guard_retention_edge_cases import _store_under
+from tests.test_guard_retention_edge_cases import _mark_stale, _store_under
 
 
 def _sources(config):
@@ -66,6 +66,9 @@ def test_prune_cannot_use_a_removed_copy_to_drop_a_failed_alias_refresh(
     monkeypatch.setattr(ing, "extract_pdf_text", lambda path: Path(path).read_text())
     ing.ingest_pdf_dir(tmp_config, fake_embedder, root, progress=lambda _: None)
     _store_under(tmp_config, "real/x.pdf", "shortcut/x.pdf")
+    # A current copy would be re-keyed to the canonical path without reading
+    # the file; the refresh under test must actually read it and fail.
+    _mark_stale(tmp_config, "excluded/copy.pdf")
     canonical.write_text(replacement)
     if other_copy == "missing":
         copy.unlink()
@@ -172,6 +175,10 @@ def test_aliases_cannot_certify_each_other_for_deletion_after_a_failed_refresh(
         embeddings=rows["embeddings"],
         metadatas=[dict(m, pdf_relpath="alias2/paper.pdf") for m in rows["metadatas"]],
     )
+    # Current copies would be re-keyed to real/paper.pdf without reading the
+    # file; the refresh under test must actually read it and fail.
+    for route in ("alias1", "alias2"):
+        _mark_stale(tmp_config, f"{route}/paper.pdf")
     monkeypatch.setattr(ing, "extract_pdf_text", lambda path: "")
     stats = ing.ingest_pdf_dir(
         tmp_config,

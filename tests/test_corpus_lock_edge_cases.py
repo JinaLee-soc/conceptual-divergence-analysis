@@ -730,6 +730,9 @@ def test_prune_keeps_alias_source_when_canonical_refresh_fails(
     before = get_collection(config).get(
         where={"pdf_relpath": "shortcuts/c/secret.pdf"}, include=["documents", "metadatas"]
     )
+    # The file must have changed: an unchanged file is re-keyed from the
+    # stored alias without being extracted, so its refresh cannot fail.
+    (linked_library / "confidential" / "secret.pdf").write_text("Novelty, revised. " * 30)
     extract = ing.extract_pdf_text
 
     def failed_extract(path):
@@ -764,7 +767,9 @@ def test_public_progress_never_exposes_server_paths(monkeypatch, mode):
         kwargs["progress"](
             f"[corpus] another ingest or retrieval is running (lock file: {HOST_LOCK}); waiting for it to finish…"
         )
-        raise CorpusLockError(f"Another run holds {HOST_LOCK}")
+        # The real timeout wording: only a held corpus gets the retry notice
+        # (see tests/test_public_lock_wording.py for the permanent cases).
+        raise CorpusLockError(f"Another ingest or retrieval still holds {HOST_LOCK} after 300s")
 
     monkeypatch.setenv("CDA_DEMO_MODE", "1")
     monkeypatch.setattr(cda.demo, "run_demo", failed_demo)

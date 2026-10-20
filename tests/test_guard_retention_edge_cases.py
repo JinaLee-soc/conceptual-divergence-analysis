@@ -136,13 +136,15 @@ def test_unsupported_guard_does_not_leave_its_descriptor_open(tmp_path, fast_loc
 
 @posix_only
 def test_other_flock_errors_still_raise(tmp_path, fast_lock, monkeypatch):
+    """EBADF is reported as a CorpusLockError (see test_guard_perf_edge_cases); others propagate."""
     import fcntl
 
     config = _config(tmp_path)
-    monkeypatch.setattr(fcntl, "flock", _failing_flock(errno.EBADF))
-    with pytest.raises(OSError):
+    monkeypatch.setattr(fcntl, "flock", _failing_flock(errno.EIO))
+    with pytest.raises(OSError) as excinfo:
         with corpus_lock(config, _quiet):
             pass
+    assert not isinstance(excinfo.value, CorpusLockError)
 
 
 @posix_only
@@ -377,6 +379,18 @@ def _store_under(config, canonical: str, relpath: str) -> None:
     )
 
 
+def _mark_stale(config, relpath: str) -> None:
+    """Record older chunk settings on ``relpath``'s rows, as a store built with another config holds them.
+
+    An unchanged file whose stored copy is complete and current is re-keyed
+    from that copy without being extracted, so a test of a failed refresh
+    needs a copy that cannot be reused.
+    """
+    collection = get_collection(config)
+    ids = collection.get(where={"pdf_relpath": relpath}, include=[])["ids"]
+    collection.update(ids=ids, metadatas=[{"chunk_size_words": 10_000}] * len(ids))
+
+
 def _aliased_store(config, fake_embedder, library):
     ing.ingest_pdf_dir(config, fake_embedder, library, progress=_quiet)
     _store_under(config, "real/x.pdf", "shortcuts/c/x.pdf")
@@ -498,6 +512,7 @@ def test_alias_is_retained_only_while_its_canonical_exists_but_cannot_be_stored(
     """Retention does not depend on --prune-missing and ends once the file is stored."""
     config = _config(tmp_path)
     _aliased_store(config, fake_embedder, linked_library)
+    _mark_stale(config, "shortcuts/c/x.pdf")  # cannot be re-keyed: the file must be read
     extract = ing.extract_pdf_text
 
     def damaged_x(path):

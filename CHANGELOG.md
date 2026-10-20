@@ -5,11 +5,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Guard access on network filesystems, rerun cost, and route moves
+
+- The `.ingest.guard` file is opened read-write when the user may write it
+  and read-only otherwise. On Linux NFS, where an exclusive lock on a
+  read-only descriptor fails with `EBADF`, the failure is a corpus-lock error
+  naming the guard, its owner and mode, and the `chmod a+w` to run, instead
+  of a traceback.
+- An unchanged rerun lists each library folder once: a per-run cache of
+  folder listings and canonical routes replaces re-listing every ancestor
+  folder of every stored source. A 3,000-folder Zotero-style rerun fell from
+  17.9 s to 2.5 s.
+- Adding or removing a link to an external folder (the canonical route is the
+  first link in sorted order) moves stored sources between routes by
+  re-keying their chunks; an unchanged file is neither extracted nor embedded
+  again, and the run reports the move in one line (`pdfs_moved`). A file whose
+  bytes changed is still rebuilt.
+- A lock timeout with no `.ingest.lock` PID file reports that another process
+  holds the corpus guard and advises removing nothing.
+- A filesystem that cannot provide the OS lock is refused with a message
+  stating what the attempt created (the store directory and the empty guard
+  file); `get_collection` recognises a corpus by its `chroma.sqlite3` file, so
+  that empty directory no longer passes for one.
+- The `[done]` line reports "N previous versions kept" instead of counting
+  retained symlink routes as failed files.
+- The public demo distinguishes a held corpus ("please retry") from storage
+  that cannot be locked (operator action needed); neither names a path.
+
 ### Corpus integrity during recovery and cleanup
 
 - Corpus operations stop with recovery advice when the filesystem cannot
-  provide an OS lock. The PID-only fallback could admit concurrent operations
-  while recovering a stale lock, so it has been removed.
+  provide an OS lock (some NFS, SMB, FUSE and container mounts); there is no
+  PID-file-only fallback, because stale-lock recovery needs the OS lock.
 - A failed PDF refresh retains its previous version even when an identical
   copy is scheduled for removal. Missing, excluded, and alias cleanup
   candidates cannot serve as the replacement that permits deletion.
@@ -20,13 +47,15 @@ All notable changes to this project are documented here. The format follows
 ### Lock portability and symlink-route retention
 
 - The public demo no longer renders the pipeline's skip reason, which names
-  the host's drafts directory; it shows a fixed, path-free notice, and a
-  corpus-lock failure is reported as "The demo cannot reach its corpus right
-  now; please retry." The local app still shows the full text.
+  the host's drafts directory; it shows a fixed, path-free notice. A corpus
+  held by another run is reported as "The demo cannot reach its corpus right
+  now; please retry."; a corpus the server cannot lock at all (unsupported
+  filesystem, unreadable guard, an unmovable lock entry) as "The demo's
+  corpus storage cannot be locked on this server; the operator needs to fix
+  the installation." Neither names a path. The local app still shows the
+  full text.
 - The live log in the local app streams every line again; only the public
   demo collapses repeated stage labels.
-- The initial PID-only fallback for filesystems without OS locks was removed
-  by the corpus-integrity repair above; those operations now stop safely.
 - The `.ingest.guard` file is created world-readable (umask applies) and
   opened read-only, so other OS users of a shared corpus can lock it; a guard
   that cannot be opened is reported with its owner and the `chmod` to run.

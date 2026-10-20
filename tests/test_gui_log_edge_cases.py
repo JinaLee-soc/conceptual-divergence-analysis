@@ -19,6 +19,10 @@ pytest.importorskip("streamlit")
 APP_PATH = str(Path(__file__).resolve().parents[1] / "gui" / "app.py")
 HOST = "/srv/private/host"
 PUBLIC_LOCK_MESSAGE = "The demo cannot reach its corpus right now; please retry."
+PUBLIC_LOCK_BROKEN_MESSAGE = (
+    "The demo's corpus storage cannot be locked on this server; "
+    "the operator needs to fix the installation."
+)
 PASSAGE_LINE = "  [ingest] secret.pdf: removing chunks stored under a different Unicode spelling"
 
 
@@ -83,14 +87,23 @@ def test_local_demo_skip_notice_keeps_the_pipelines_reason(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "detail",
+    ("detail", "notice"),
     [
-        f"Another ingest or retrieval still holds {HOST}/.ingest.lock after 300s",
-        f"Could not reclaim the stale lock {HOST}/.ingest.lock (PermissionError)",
+        (
+            f"Another ingest or retrieval still holds {HOST}/.ingest.lock after 300s",
+            PUBLIC_LOCK_MESSAGE,
+        ),
+        # A lock the server cannot reclaim is not a wait: a retry cannot help,
+        # so the visitor gets the permanent notice (see
+        # tests/test_public_lock_wording.py for the full set of wordings).
+        (
+            f"Could not reclaim the stale lock {HOST}/.ingest.lock (PermissionError)",
+            PUBLIC_LOCK_BROKEN_MESSAGE,
+        ),
     ],
     ids=["held", "unreclaimable"],
 )
-def test_public_lock_failure_is_generic_whatever_its_cause(monkeypatch, detail):
+def test_public_lock_failure_is_generic_whatever_its_cause(monkeypatch, detail, notice):
     import cda.demo
 
     def failing_demo(**kwargs):
@@ -102,7 +115,7 @@ def test_public_lock_failure_is_generic_whatever_its_cause(monkeypatch, detail):
     _click_demo(app)
     assert not app.exception, f"GUI raised: {app.exception}"
     errors = " ".join(e.value for e in app.error)
-    assert PUBLIC_LOCK_MESSAGE in errors
+    assert notice in errors
     assert "Another run holds" not in errors  # a cause the GUI cannot know
     assert "/srv/" not in _page_text(app)
 

@@ -215,16 +215,27 @@ The operating system releases its lock when a process exits. A leftover
 `.ingest.lock` PID record is checked and recovered on the next operation,
 including a record of the running process's own id (a container restarted
 as PID 1) and an entry that is not a readable file. The guard is created
-world-readable (your umask applies) and opened read-only, so other OS users
-of a shared corpus can lock it too; if it was created without read access
-for them, CDA names the file, its owner and the `chmod` to run. On a
-filesystem that cannot provide OS file locks, CDA stops before accessing
-the corpus. Use a corpus directory on a filesystem that supports those
-locks, or restore locking support and retry. A PID file alone cannot safely
+world-readable and -writable (your umask applies) and opened read-write when
+your account may write it, read-only otherwise, so other OS users of a
+shared corpus can lock it too. On a network filesystem (NFS) an exclusive
+lock needs write access to the guard, so a guard opened read-only there is
+refused; CDA then names the file, its owner and mode, and the `chmod a+w` to
+run, as it does for a guard that cannot be opened at all. If a process holds
+the guard without a PID file (for example, another program locking it), the
+timeout message says so and advises removing nothing. On a filesystem that
+cannot provide OS file locks, CDA stops before accessing the corpus and
+reports what the attempt created (the store directory and the empty guard
+file). Use a corpus directory on a filesystem that supports those locks, or
+restore locking support and retry. A PID file alone cannot safely
 coordinate concurrent recovery after a crash.
 
 When an older corpus stores a PDF under a symlink route, CDA migrates it to
-the canonical route. If the canonical file exists but could not be stored
+the canonical route. The canonical route of a folder outside the library is
+its first link in sorted order, so adding or removing a link (`a -> E`
+beside `b -> E`) moves every source in that folder to the other route; an
+unchanged file is moved by re-keying its stored chunks, without extracting
+or embedding it again, and the run reports the route change in one line.
+If the canonical file has changed but could not be stored
 (unreadable, no text, or a failed refresh), the previous copy is retained
 under its route and reported, whether or not `--prune-missing` is given. If
 the canonical file is gone, the route is a missing source; if the file is
