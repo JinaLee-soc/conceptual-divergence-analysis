@@ -1803,14 +1803,10 @@ def ingest_pdf_dir(
                     )
                     stored_sources.pop(relpath, None)
                     moves.append((relpath, root, rel_name))
-                stats["pdfs_renamed"] += len(renamed)
-                stats["pdfs_moved"] += 1
                 stored_sources[rel_name] = {
                     "pdf_root": pdf_root,
                     "source_file_sha256": source_sha256,
                 }
-                stats["pdfs_ingested"] += 1
-                stats["pdfs_refreshed"] += state != "absent"
                 if kept:
                     stats["zotero_kept"] += 1
                     progress(
@@ -1836,6 +1832,13 @@ def ingest_pdf_dir(
                             + _failed_refresh_note("complete")
                         )
                         continue
+                # Counted only once the refresh succeeds: a failed refresh is
+                # reported, as in the complete path, as unreadable with its
+                # stored version (now under this name) kept, not also ingested.
+                stats["pdfs_renamed"] += len(renamed)
+                stats["pdfs_moved"] += 1
+                stats["pdfs_ingested"] += 1
+                stats["pdfs_refreshed"] += state != "absent"
                 progress(
                     f"  [ingest] {rel_name}: {len(prepared['ids'])} chunks re-keyed from {reusable!r}"
                 )

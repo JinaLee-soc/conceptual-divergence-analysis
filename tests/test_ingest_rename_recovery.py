@@ -188,3 +188,42 @@ def test_failed_rebuild_of_a_rename_keeps_the_old_copy_under_prune(
     )
     assert stats["pdfs_ingested"] == 1 and stats["pdfs_renamed"] == 1
     assert {m["pdf_relpath"] for m in _rows(config)["metadatas"]} == {"aa.pdf"}
+
+
+def test_failed_refresh_after_a_rename_is_counted_once(
+    tmp_path, monkeypatch, library, fake_embedder
+):
+    # The re-key has already moved the stored chunks to the new name when
+    # the Zotero refresh fails, so the file is reported as the complete
+    # path reports the same failure: unreadable, its stored version kept.
+    root, config = library
+    csv = tmp_path / "zotero.csv"
+    csv.write_text(
+        "Title,Item Type,Publication Year,File Attachments,Manual Tags\n"
+        "Researcher's paper,journalArticle,2024,a.pdf,#MyWork\n"
+    )
+    old = root / "a.pdf"
+    old.write_text("Novelty has a stable meaning. " * 30)
+    ing.ingest_pdf_dir(config, fake_embedder, root, csv, progress=_quiet)
+    before = _rows(config)
+    old.rename(root / "b.pdf")
+    real_extract = ing.extract_pdf_text
+
+    def broken_extract(path):
+        raise ValueError("extractor failed")
+
+    monkeypatch.setattr(ing, "extract_pdf_text", broken_extract)
+    messages = []
+    stats = ing.ingest_pdf_dir(config, fake_embedder, root, csv, progress=messages.append)
+    assert stats["pdfs_seen"] == 1
+    assert (stats["pdfs_ingested"], stats["pdfs_renamed"], stats["pdfs_refreshed"]) == (0, 0, 0)
+    assert stats["pdfs_unreadable"] == 1 and stats["pdfs_kept_previous"] == 1
+    assert any("b.pdf (previous version kept)" in m for m in messages)
+    after = _rows(config)
+    assert {m["pdf_relpath"] for m in after["metadatas"]} == {"b.pdf"}
+    assert after["documents"] == before["documents"]
+    assert np.allclose(after["embeddings"], before["embeddings"], rtol=1e-6, atol=1e-7)
+    monkeypatch.setattr(ing, "extract_pdf_text", real_extract)
+    stats = ing.ingest_pdf_dir(config, fake_embedder, root, csv, progress=_quiet)
+    assert stats["pdfs_unreadable"] == 0 and stats["pdfs_skipped"] == 1
+    assert all(m["zotero_match_filename"] == "b.pdf" for m in _rows(config)["metadatas"])
