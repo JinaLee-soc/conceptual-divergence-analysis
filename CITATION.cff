@@ -1,8 +1,7 @@
 cff-version: 1.2.0
 message: >-
-  If you use this software, please cite it using the metadata below. A
-  journal reference will be added upon acceptance of the accompanying
-  article.
+  If you use this software, please cite the accompanying article in
+  Scientometrics using the preferred citation below (forthcoming).
 type: software
 title: >-
   Conceptual Divergence Analysis (CDA): a retrieval-augmented pipeline for
@@ -21,8 +20,8 @@ repository-code: "https://github.com/JinaLee-soc/conceptual-divergence-analysis"
 preferred-citation:
   type: article
   title: >-
-    Toward a Personalization Turn in AI-Assisted Research Infrastructure:
-    Conceptual Divergence Analysis for Reflective Auditing
+    Conceptual Divergence Analysis: LLM-Assisted Mapping of a Researcher’s
+    Conceptual Vocabulary against Their Curated Literature
   authors:
     - family-names: Lee
       given-names: Jina
@@ -30,5 +29,5 @@ preferred-citation:
     - family-names: Li
       given-names: Zhuofan
       orcid: "https://orcid.org/0000-0002-5104-528X"
-  journal: "[under review]"
-  year: 2026
+  journal: Scientometrics
+  year: Forthcoming

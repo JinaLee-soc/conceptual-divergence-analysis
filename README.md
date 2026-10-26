@@ -151,5 +151,7 @@ failures, in an [adoption report](.github/ISSUE_TEMPLATE/adoption_report.md).
 
 ## Citation & license
 
+Lee, Jina, Zhuofan Li. (Forthcoming). Conceptual Divergence Analysis: LLM-Assisted Mapping of a Researcher’s Conceptual Vocabulary against Their Curated Literature. *Scientometrics*.
+
 Code: Apache-2.0 ([LICENSE](LICENSE)). Documentation and prompts: CC BY 4.0.
 Toy corpus: CC0. Cite via [CITATION.cff](CITATION.cff).
