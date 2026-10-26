@@ -31,6 +31,19 @@ Run manifests and exact comparisons are documented in [Reproducibility](docs/rep
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the current literal-only workflow.
 The [workflow figure](docs/workflow_schema.svg) shows an earlier version of the pipeline; it predates the v5 literal-only extraction.
 
+## Try the web demo (no installation needed)
+
+**[Open the CDA web demo](https://jinalee-soc.github.io/conceptual-divergence-analysis/)**
+
+Choose **novelty** or **consensus**, then press **Play** or select a stage to
+explore corpus counts, shared clusters, supporting passages, and the saved report.
+Download the example reports as Markdown.
+
+This walkthrough presents fixed toy results; it does not run a new analysis or
+accept uploads. No API key or installation is required. To run the pipeline,
+follow the local demo instructions below. See [web demo documentation](docs/github-pages-demo.md)
+for source provenance and build instructions.
+
 ## Try it in two minutes (no API key needed)
 
 On macOS, double-click [CDA GUI Demo.command](CDA%20GUI%20Demo.command) from

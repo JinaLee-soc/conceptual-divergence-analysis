@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore precomputed Conceptual Divergence Analysis results from two public toy examples.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Conceptual Divergence Analysis — Demo</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#walkthrough">Skip to walkthrough</a>
+<header class="masthead"><span>CDA / Interactive demo</span><a href="#full-report">Read full report</a></header>
+<main>
+  <div class="intro">
+    <p class="eyebrow">PRECOMPUTED RESULTS · PUBLIC TOY EXAMPLES</p>
+    <h1>Conceptual Divergence Analysis</h1>
+    <p>Explore how a fictional researcher’s use of a concept compares with its use in a literature corpus.</p>
+    <p class="muted">Choose an example, then walk through its saved results. Playback explains the analysis stages; it does not run a new analysis or show change over time.</p>
+  </div>
+  <p id="load-status" role="status">Loading the two saved examples…</p>
+  <noscript><p>This walkthrough needs JavaScript. You can still download the original reports: <a href="downloads/novelty.md">novelty</a> or <a href="downloads/consensus.md">consensus</a>.</p></noscript>
+  <div id="demo" hidden>
+    <section class="case-picker" aria-label="Example selection">
+      <label for="case-select">Example concept</label>
+      <select id="case-select"><option value="novelty">Novelty</option><option value="consensus">Consensus</option></select>
+      <span id="case-meta" class="muted"></span>
+    </section>
+    <section id="walkthrough" aria-label="Result walkthrough">
+      <div class="playback">
+        <button id="play" class="primary" aria-pressed="false">Play walkthrough</button>
+        <button id="previous" aria-label="Previous stage">Previous</button>
+        <button id="next" aria-label="Next stage">Next</button>
+        <span id="play-status" class="muted" role="status" aria-live="polite"></span>
+      </div>
+      <nav id="steps" class="steps" aria-label="Analysis stages"></nav>
+      <section id="stage" tabindex="-1" aria-labelledby="stage-title"></section>
+    </section>
+    <section class="verification" aria-labelledby="verification-title">
+      <h2 id="verification-title">Read these results with their limits</h2>
+      <div id="checks"></div>
+      <p class="muted">These are software examples, not researcher-endorsed findings or manuscript results. The interpretation was authored in a Claude Code session. Computed checks come from the saved toy run.</p>
+    </section>
+    <section class="downloads" aria-labelledby="download-title">
+      <h2 id="download-title">Keep a copy</h2>
+      <p>Download the saved Markdown report with its original wording and values.</p>
+      <a id="download-md" class="button" download>Download Markdown</a>
+    </section>
+    <details id="full-report">
+      <summary>Read the full saved report</summary>
+      <article id="report"></article>
+    </details>
+    <details class="provenance">
+      <summary>Source and reproducibility</summary>
+      <p>Only the repository’s public toy reports are included: CC0 OpenAlex abstracts and clearly fictional drafts. No visitor text is collected and no model calls are made.</p>
+      <p id="source"></p><p id="hash" class="hash"></p>
+      <p>The walkthrough reads recorded values. It does not independently revalidate the source publications or establish the scientific validity of the interpretation. GitHub serves the site and may retain standard access logs.</p>
+      <a href="manifest.json" download>Download file checksums</a>
+    </details>
+  </div>
+</main>
+<footer>CDA · Fixed results walkthrough · Toy reports dated 18 October 2026</footer>
+</body>
+</html>

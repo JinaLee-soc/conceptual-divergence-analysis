@@ -1,0 +1,58 @@
+name: Public demo Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'scripts/build_pages.py'
+      - 'demo/expected_reports/**'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'scripts/build_pages.py'
+      - 'demo/expected_reports/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify source fidelity and publication boundary
+        run: python -m unittest discover -s web/tests -v
+      - name: Check JavaScript
+        run: node --check web/app.js
+      - name: Build public files only
+        run: python scripts/build_pages.py --output "${{ runner.temp }}/cda-pages"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/cda-pages
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.PAGES_ENABLED == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy the verified artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
